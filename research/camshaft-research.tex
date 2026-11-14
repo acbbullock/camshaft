@@ -254,11 +254,16 @@ rules give the optimiser the \enquote{no two mutable references overlap}
 guarantee that Fortran compilers have always exploited and C compilers must be
 told about with \code{restrict}.
 
-Evidence that Rust can reach the necessary CPU performance is accumulating.  A
-distributed runtime written entirely in Rust, Lamellar, was the subject of an
-invited talk at ISC~2026~\cite{lamellar}, and CEA is developing a Rust
-interface to Kokkos, Krokkos, with the explicit aim of using ownership rules
-to catch data races in parallel loops at compile time~\cite{krokkos}.
+Interest in Rust for software of this kind is growing in the
+high-performance computing community.  Lamellar, a distributed tasking
+runtime developed in Rust at Pacific Northwest National Laboratory, was the
+subject of an invited talk at ISC~2026~\cite{lamellarisc}; its network back
+ends still rest on C libraries, and the project describes itself as under
+development~\cite{lamellar}.  CEA is developing Krokkos, an experimental Rust
+interface to Kokkos whose stated goal is a Rust API over Kokkos views that
+exposes no unsafe code to its users~\cite{krokkos}.  Neither is evidence
+about performance.  That has to come from measurement, which is what the
+early milestones of Section~\ref{sec:roadmap} are for.
 
 \paragraph{What Rust gets wrong, or has not finished.}  Four gaps matter.
 
@@ -325,7 +330,7 @@ front end, without touching the core.
 \toprule
 Language & For & Against \\
 \midrule
-Lua 5.4/5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library \\
+Lua 5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library \\
 LuaJIT & Much faster than the reference interpreter; excellent foreign function interface & Frozen at Lua~5.1 semantics; no tagged releases; narrower platform coverage \\
 Luau & Gradual types; sandboxing; actively developed & A dialect; implemented in C++ \\
 Python & Familiar to nearly every scientist & Heavy; start-up and import cost; embedding fixes the interpreter version for every package \\
@@ -349,21 +354,25 @@ when an event fires.  The interpreter is a few hundred kilobytes and has no
 start-up cost worth measuring, which matters when it is launched on every MPI
 rank.
 
-The \code{mlua} crate provides the Rust binding.  Its 0.11.6 release (January
-2026) supports Lua~5.1 to 5.5, LuaJIT and Luau behind feature flags, can
-compile the chosen Lua from vendored source so that there is no system
-dependency, and supports asynchronous Rust functions as Lua
-coroutines~\cite{mlua}.  Because one binding covers all the dialects, the
+The \code{mlua} crate provides the Rust binding.  Its current release, 0.12.2
+(October 2026), supports Lua~5.1 to 5.5, LuaJIT and Luau behind feature
+flags, can compile the chosen Lua from vendored source so that there is no
+system dependency, and supports asynchronous Rust functions as Lua
+coroutines~\cite{mlua}.  Lua~5.5 has been supported since release 0.11.6
+(January 2026).  Because one binding covers all the dialects, the
 choice between them can be deferred and even left to the person building the
 package.
 
 \paragraph{Which Lua.}  The default should be the reference implementation,
-Lua~5.4 or 5.5~\cite{lua55}, for three reasons: it has true 64-bit integers,
-which matter for object identifiers and counts; it compiles anywhere there is
-a C compiler; and it is the version the language's documentation describes.
-LuaJIT is faster but no longer makes tagged releases and adds no new
-features~\cite{luajitstatus}, and its speed is irrelevant if the next
-principle is followed.
+for three reasons: it has true 64-bit integers, which matter for object
+identifiers and counts; it compiles anywhere there is a C compiler; and it is
+the version the language's documentation describes.  Of its versions,
+Lua~5.5~\cite{lua55} is the one to adopt.  It was released in December 2025,
+and the Lua team has stated that 5.4.9 (August 2026) is the last release of
+Lua~5.4~\cite{luaversions}.  LuaJIT is faster, but it publishes rolling
+releases with no tagged versions, its maintained branch accepts only limited
+new features~\cite{luajitstatus}, and it remains at the Lua~5.1 language
+level.  Its speed is irrelevant if the next principle is followed.
 
 \paragraph{Lua stays out of the hot path.}  The rule that makes a scripting
 language compatible with \ref{req:perf} is that the script decides
@@ -464,8 +473,9 @@ live in device memory.  It carries a device type and identifier and an
 optional synchronisation event, keeps all metadata on the host, and
 deliberately uses the same device-type numbering as DLPack~\cite{dlpack}, the
 tensor-exchange convention used by the Python array libraries.  Its device
-list already includes CUDA, pinned CUDA host memory, ROCm, OpenCL, Vulkan and
-Metal.  The specification still describes itself as experimental.
+list already includes CUDA, pinned CUDA host memory, ROCm, OpenCL, Vulkan,
+Metal, oneAPI and WebGPU.  The specification still describes itself as
+experimental.
 
 The recommendation is \emph{not} to build on an Arrow library, since those
 bring far more than is needed, but to make \camshaft{} columns layout-compatible
@@ -482,9 +492,9 @@ with flags recording which is current.  This is the pattern Kokkos calls a
 dual view~\cite{kokkos3}.  It keeps synchronisation explicit and lazy: a
 kernel declares which columns it reads and writes and where it runs, and the
 store copies only what is stale.  The cost of getting this wrong is large.
-The Rust offload study measured a slowdown of more than $400\times$ on an AMD
-MI250X when data was moved automatically on every kernel launch, removed
-entirely by keeping data resident on the device~\cite{rustoffload}.
+The Rust offload study found that transferring data automatically at every
+kernel launch could be more than $400\times$ slower on an AMD MI250X than the
+same code with data moved explicitly, once per benchmark~\cite{rustoffload}.
 
 Kernels declaring their reads and writes has a second benefit, taken from
 Legion: the scheduler can see which kernels are independent and run them
@@ -602,10 +612,10 @@ ecosystem~\cite{cudaoxide}.
 \toprule
 Project & Approach & Hardware & Concern \\
 \midrule
-wgpu~\cite{wgpu} & WebGPU API; kernels in a shading language & Any GPU with Vulkan, Metal or DirectX~12 & Shading language has no 64-bit floats \\
-CubeCL~\cite{cubecl} & Rust DSL compiled at run time & CUDA, ROCm, and everything wgpu reaches & Restricted kernel language; young (version 0.10) \\
+wgpu~\cite{wgpu} & WebGPU API; kernels in a shading language & Any GPU with Vulkan, Metal or DirectX~12 & Shading language has no 64-bit floats, except through an extension on Vulkan alone \\
+CubeCL~\cite{cubecl} & Rust DSL compiled at run time & CUDA, HIP, everything wgpu reaches, and CPUs & Restricted kernel language; self-described alpha (version 0.11) \\
 Rust GPU~\cite{rustgpu} & Compiler back end producing SPIR-V & Vulkan-capable GPUs & Graphics-oriented; nightly compiler \\
-cuda-oxide~\cite{cudaoxide} & Compiler back end producing PTX & NVIDIA only & Early alpha; one vendor \\
+cuda-oxide~\cite{cudaoxide} & Compiler back end producing PTX & NVIDIA only & Early-stage research project; one vendor \\
 \code{std::offload}~\cite{rustoffload} & In the compiler, on LLVM's offload runtime & NVIDIA and AMD; Intel in progress & Nightly only; experimental \\
 Vendor libraries through C & CUDA, HIP, oneAPI, Metal called through bindings & Each vendor's own & One kernel source per vendor \\
 \bottomrule
@@ -618,7 +628,10 @@ Three observations follow.
 
 \paragraph{Double precision excludes the most portable route.}  WebGPU's
 shading language has no 64-bit floating-point type, and Apple's Metal has
-none either.  Most multiphysics codes need double precision at least in part.
+none either.  wgpu offers 64-bit floats only as a native extension on its
+Vulkan back end, with a warning that they may be many times slower than
+32-bit ones~\cite{wgpu}.  Most multiphysics codes need double precision at
+least in part.
 The wgpu route, which is otherwise the most portable and the most mature, is
 therefore unsuitable as the \emph{only} back end, and any design must allow
 some kernels to be unavailable on some devices.
@@ -626,14 +639,18 @@ some kernels to be unavailable on some devices.
 \paragraph{The compiler-integrated route is the most promising, and is not
 ready.}  \code{std::offload} compiles ordinary Rust functions for the GPU
 through the same LLVM machinery that OpenMP offload uses in C++ and Fortran.
-A study published in August 2026 reports whole-benchmark run times, on a
-subset of the RAJA performance suite, between 32\% faster and 43\% slower
-than native HIP on an AMD MI250X and between 11\% faster and 46\% slower than
-native CUDA on an NVIDIA H100~\cite{rustoffload}.  That is close enough to be
-taken seriously.  But the authors describe the work as a prototype, the
-project is tracked as a multi-year goal~\cite{offloadgoal,rustgoals2026}, and
-there is no commitment about when, or in what form, it will reach stable
-Rust.
+A study published in August 2026 reports whole-benchmark run times, on
+thirteen kernels ported from the RAJA performance suite, between 32\% faster
+and 43\% slower than native HIP on an AMD MI250X and between 11\% faster and
+46\% slower than native CUDA on an NVIDIA H100~\cite{rustoffload}.  That is
+close enough to be taken seriously.  But the authors describe the work as a
+prototype and obtained those results with their own extended compiler, and
+support for Intel GPUs is still under development.  The Rust project goal to
+finish the module in the second half of 2025~\cite{offloadgoal} was not
+completed and was superseded by a broader goal for
+2026~\cite{rustgoals2026}, which states that stabilisation will not be
+requested during that period~\cite{mlgoal2026}.  There is no commitment
+about when, or in what form, it will reach stable Rust.
 
 \paragraph{No Rust option yet matches Kokkos.}  Kokkos gives C++ codes one
 kernel source for CUDA, HIP, SYCL and OpenMP, in production, at
@@ -808,7 +825,8 @@ them.  Three properties of Kokkos make this natural.
 \begin{itemize}
   \item \textbf{Kokkos can adopt memory it did not allocate.}  A
         \code{Kokkos::View} constructed from a raw pointer and extents is
-        \emph{unmanaged}: it neither copies nor frees the memory.  A handler
+        \emph{unmanaged}: it neither copies nor frees the
+        memory~\cite{kokkosdocs}.  A handler
         can therefore wrap \camshaft{} columns as views at no cost, on the host or
         on a device.
   \item \textbf{The two data models agree.}  A \camshaft{} column is a contiguous,
@@ -858,8 +876,9 @@ extern "C" cam_status advance(cam_batch* batch, void* /*ctx*/) try {
 Each item below is an obligation on \camshaft{} that the earlier sections did not
 state, or stated only in general terms.
 
-\paragraph{Runtime life cycle.}  Kokkos must be initialised exactly once per
-process, after MPI is initialised, and finalised before MPI is finalised.  The
+\paragraph{Runtime life cycle.}  Kokkos can be initialised at most once per
+process, and should be initialised after MPI and finalised before MPI is
+finalised~\cite{kokkosdocs}.  The
 plugin interface therefore needs initialisation and finalisation hooks with a
 defined order relative to MPI and to other plugins, in addition to the
 registration function of Section~\ref{sec:api}.  \camshaft{} must also tell the
@@ -875,7 +894,8 @@ initialisation, and packages depend on that adapter.
 
 \paragraph{Layout.}  A fixed-size-vector column stored in the Arrow manner is
 interleaved ($x_0 y_0 z_0\, x_1 y_1 z_1 \ldots$), which Kokkos calls
-\code{LayoutRight}.  On GPUs, Kokkos defaults to \code{LayoutLeft}.  The
+\code{LayoutRight}.  On GPUs, Kokkos defaults to
+\code{LayoutLeft}~\cite{kokkosdocs}.  The
 adapter must construct views with the layout stated explicitly.  Whether
 interleaved storage is the right default for vector fields, or whether each
 component should be its own column, is a performance question for M1 and M5;
@@ -896,8 +916,10 @@ already has a field for one.  The simple contract should come first.
 
 \paragraph{Concurrency.}  Section~\ref{sec:schema} proposed running
 independent kernels concurrently.  Kokkos has historically not supported
-launching parallel regions from several host threads at once, and where it
-does, it requires separate execution-space instances.  Handlers must
+launching parallel regions from several host threads at once.  Its route to
+doing so is separate execution-space instances, and the function that
+creates them is still in Kokkos's experimental
+namespace~\cite{kokkosdocs}.  Handlers must
 therefore be able to declare that they are to be called from one thread at a
 time, and that should be the default.  Concurrency between Kokkos kernels can
 be revisited later through execution-space instances.
@@ -1051,8 +1073,9 @@ language, not the package author, should meet them.
         starts the Julia runtime in its initialisation hook and Julia
         functions are registered as handlers through C-callable function
         pointers.  Compiling Julia packages ahead of time into shared
-        libraries is possible with JuliaC but is still labelled
-        experimental~\cite{juliac}.
+        libraries is possible with JuliaC, on Julia~1.12 or later, but the
+        trimming that keeps such libraries small is still an experimental
+        compiler feature~\cite{juliac}.
   \item[Python.]
         The same two options: Python as host, or an embedded interpreter
         started by a binding.  The first is much the more common need.
@@ -1125,8 +1148,10 @@ packages as static libraries, and a \code{main}.  Three points need care.
 
 \begin{itemize}
   \item \emph{Only one Rust static library per link.}  A Rust static library
-        contains the standard library and exposes internal symbols, so two of
-        them in one link collide~\cite{ruststaticlib}.  All Rust code in a
+        contains the standard library and does not hide its internal symbols,
+        so two of them in one link can conflict or silently override each
+        other; the compiler options that would hide those symbols are still
+        unstable~\cite{ruststaticlib}.  All Rust code in a
         static build must go through the single distribution crate described
         above.
   \item \emph{Registration must be explicit.}  Without dynamic loading there
@@ -1256,10 +1281,14 @@ high-performance machine, and \camshaft{} must use it.  The state of the Rust
 bindings (Section~\ref{sec:language}) matters less than it seems, for two
 reasons.
 
-First, MPI~5.0, ratified in June 2025, standardises the ABI: one header and
+First, MPI~5.0, approved in June 2025, standardises the ABI: one header and
 one set of type and constant definitions, valid for every conforming
-implementation~\cite{mpi50,mpiabi}.  MPICH already implements it and Open MPI
-support was in progress when the standard was published.  Against a standard
+implementation~\cite{mpi50,mpiabi}.  MPICH has implemented it since version
+5.0.0, released in February 2026~\cite{mpich5}.  Open MPI has added it for
+its 6.0 series, which had not been released when this was written, and so
+far for C only: its change log notes that the Fortran bindings are not yet
+covered~\cite{ompi6}.  That gap does not affect a binding from Rust, which
+uses the C interface.  Against a standard
 ABI, a Rust binding no longer needs to discover each implementation's
 definitions when it is built; the interface can be declared once.  The part of
 MPI that an infrastructure layer needs (communicators, non-blocking
@@ -1384,8 +1413,11 @@ allows the infrastructure, and not each package, to do the following.
 and the operations a mesh package needs most are matrix operations.
 Transposition turns cell-to-node into node-to-cell.  Composition turns
 cell-to-face and face-to-cell into cell-to-cell.  Which adjacencies to store
-and which to derive is the mesh package's decision; DMPlex stores them all,
-MOAB derives most on demand.  The infrastructure should provide transpose,
+and which to derive is the mesh package's decision.  DMPlex stores only the
+relations between entities of adjacent dimension, in both directions, and
+obtains the rest by traversal~\cite{dmplex}; MOAB stores each element's
+vertices and derives most other adjacencies on demand~\cite{moab}.  The
+infrastructure should provide transpose,
 compose and sort as bulk operations on the host.  Device versions raise the
 kernel-technology question of Section~\ref{sec:gpu} for the core itself and
 should be decided in M5; until then a mesh package can supply its own through
@@ -1703,7 +1735,7 @@ through every milestone from M1.
         \emph{Measure:} dispatch overhead as a function of table size, to find
         where per-table dispatch stops being free (risk~\ref{risk:dispatch}).
   \item[M3. Lua front end.]
-        Embed Lua~5.4 through \code{mlua}; expose type definition, handler
+        Embed Lua~5.5 through \code{mlua}; expose type definition, handler
         binding and commands; run a script end to end.
         \emph{Measure:} time spent in Lua per time step for a realistic
         script.  The target is a negligible fraction.
@@ -1784,9 +1816,9 @@ GitHub, which determines the resources available.
   \item \emph{The core's unsafe code}.  A columnar store with raw buffers and
         a foreign interface cannot avoid \code{unsafe} Rust.  Miri, which
         interprets Rust and detects undefined behaviour~\cite{miri}, should
-        run the store's tests; it cannot follow calls into foreign code, so
-        address and undefined-behaviour sanitizers are needed for tests that
-        cross the language boundary.
+        run the store's tests; its support for calls into foreign code is
+        experimental and narrow, so address and undefined-behaviour
+        sanitizers are needed for tests that cross the language boundary.
   \item \emph{The stability of the C interface}.  The generated header must
         match the source, and the binary interface of each build should be
         compared with the last release by an ABI checker such as
@@ -1816,7 +1848,7 @@ Runner & Resources & Use here \\
 Linux x86-64 & 4 cores, 16\,GB & The primary platform; every test that needs no GPU \\
 Linux AArch64 & 4 cores, 16\,GB & Second architecture for the store, SIMD paths and the C interface \\
 macOS, Apple silicon & 3 cores, 7\,GB & Developer platform; a second C++ and Fortran toolchain \\
-GPU (one NVIDIA T4) & 4 cores, 28\,GB & Not available: restricted to organisation plans and billed per minute~\cite{ghlarger} \\
+GPU (one NVIDIA T4) & 4 cores, 28\,GB & Not available: a \enquote{larger runner}, offered only to organisations on paid plans and billed per minute even for public repositories~\cite{ghlarger} \\
 \bottomrule
 \end{tabularx}
 \caption{GitHub-hosted runners for a public repository.}
@@ -1845,7 +1877,8 @@ They are insufficient in three respects.
         the milestones cannot be judged there.  What can be measured
         reliably is the \emph{number of instructions} executed, which is
         nearly deterministic; a harness built on Callgrind, such as
-        iai-callgrind~\cite{iaicallgrind}, will detect a regression in
+        Gungraun (formerly iai-callgrind)~\cite{gungraun}, will detect a
+        regression in
         dispatch or iteration overhead on a hosted runner.  Instruction
         counts say nothing about memory bandwidth, so they complement
         wall-clock measurement and do not replace it.
@@ -1945,7 +1978,7 @@ Question & Recommendation \\
 \midrule
 Core language & Rust, on the stable compiler \\
 Interface language & C ABI, header generated from the Rust source \\
-User-facing language & A DSL embedded in Lua~5.4/5.5 through \code{mlua}; confined to the control plane \\
+User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined to the control plane \\
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
 Dispatch & Dynamic per table through a (message, type, device) table; static within kernels \\
 GPU strategy & The infrastructure owns memory and scheduling; kernels are opaque and may come from any toolchain \\

@@ -9,6 +9,7 @@
   number  = {10},
   pages   = {1768--1778},
   year    = {2009},
+  doi     = {10.1016/j.nucengdes.2009.05.021},
 }
 
 @article{amrex,
@@ -19,6 +20,7 @@
   number  = {37},
   pages   = {1370},
   year    = {2019},
+  doi     = {10.21105/joss.01370},
 }
 
 @article{kokkos3,
@@ -29,6 +31,7 @@
   number  = {4},
   pages   = {805--817},
   year    = {2022},
+  doi     = {10.1109/TPDS.2021.3097283},
 }
 
 @inproceedings{legion,
@@ -36,6 +39,7 @@
   title     = {Legion: Expressing Locality and Independence with Logical Regions},
   booktitle = {Proceedings of the International Conference on High Performance Computing, Networking, Storage and Analysis (SC12)},
   year      = {2012},
+  doi       = {10.1109/SC.2012.71},
 }
 
 @inproceedings{regent,
@@ -43,6 +47,7 @@
   title     = {Regent: A High-Productivity Programming Language for {HPC} with Logical Regions},
   booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC15)},
   year      = {2015},
+  doi       = {10.1145/2807591.2807629},
 }
 
 @inproceedings{terra,
@@ -50,6 +55,8 @@
   title     = {Terra: A Multi-Stage Language for High-Performance Computing},
   booktitle = {Proceedings of the 34th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)},
   year      = {2013},
+  pages     = {105--116},
+  doi       = {10.1145/2491956.2462166},
 }
 
 @inproceedings{charm,
@@ -57,6 +64,8 @@
   title     = {{CHARM++}: A Portable Concurrent Object Oriented System Based on {C++}},
   booktitle = {Proceedings of the Eighth Annual Conference on Object-Oriented Programming Systems, Languages, and Applications (OOPSLA)},
   year      = {1993},
+  pages     = {91--108},
+  doi       = {10.1145/165854.165874},
 }
 
 @article{lammps,
@@ -66,6 +75,7 @@
   volume  = {271},
   pages   = {108171},
   year    = {2022},
+  doi     = {10.1016/j.cpc.2021.108171},
 }
 
 @article{parthenon,
@@ -76,6 +86,7 @@
   number  = {5},
   pages   = {465--486},
   year    = {2023},
+  doi     = {10.1177/10943420221143775},
 }
 
 @inproceedings{cactus,
@@ -86,6 +97,8 @@
   volume    = {2565},
   publisher = {Springer},
   year      = {2003},
+  pages     = {197--227},
+  doi       = {10.1007/3-540-36569-9_13},
 }
 
 @article{julia,
@@ -96,6 +109,7 @@
   number  = {1},
   pages   = {65--98},
   year    = {2017},
+  doi     = {10.1137/141000671},
 }
 
 @inproceedings{enzyme,
@@ -106,20 +120,21 @@
   year      = {2020},
 }
 
-@misc{mpiabi,
-  author       = {Hammond, Jeff R. and others},
-  title        = {{MPI} Application Binary Interface Standardization},
-  year         = {2023},
-  howpublished = {arXiv:2308.11214},
-  url          = {https://arxiv.org/abs/2308.11214},
+@inproceedings{mpiabi,
+  author    = {Hammond, Jeff R. and others},
+  title     = {{MPI} Application Binary Interface Standardization},
+  booktitle = {Proceedings of the 30th European MPI Users' Group Meeting (EuroMPI '23)},
+  year      = {2023},
+  doi       = {10.1145/3615318.3615319},
+  note      = {Preprint: arXiv:2308.11214},
 }
 
 @misc{mpi50,
   author = {{Message Passing Interface Forum}},
   title  = {{MPI}: A Message-Passing Interface Standard, Version 5.0},
   year   = {2025},
-  url    = {https://www.mpi-forum.org/mpi-50},
-  note   = {Ratified 5 June 2025; Chapter 21 specifies the standard ABI},
+  url    = {https://www.mpi-forum.org/docs/mpi-5.0/mpi50-report.pdf},
+  note   = {Approved 5 June 2025; Chapter 21 specifies the standard ABI},
 }
 
 @misc{rustoffload,
@@ -132,7 +147,7 @@
 
 @misc{rustgoals2026,
   author = {{Rust Project}},
-  title  = {Project goals update -- {April} 2026},
+  title  = {Project goals update -- {April} 2026 (end of 2025H2)},
   year   = {2026},
   url    = {https://blog.rust-lang.org/2026/05/18/project-goals-2026-04/},
 }
@@ -148,12 +163,12 @@
   author = {{Rust Project}},
   title  = {Finish the \texttt{std::offload} module ({Rust} project goal, 2025H2)},
   year   = {2025},
-  url    = {https://rust-lang.github.io/rust-project-goals/2025h2/finishing-gpu-offload.html},
+  url    = {https://goals.rust-lang.org/2025h2/finishing-gpu-offload.html},
 }
 
 @misc{portablesimd,
   author = {{Rust Project}},
-  title  = {Tracking issue for \texttt{portable\_simd} (rust-lang/rust \#86656)},
+  title  = {Tracking Issue for {RFC} 2948: Portable {SIMD} (rust-lang/rust \#86656)},
   url    = {https://github.com/rust-lang/rust/issues/86656},
   year   = {2021},
 }
@@ -188,23 +203,32 @@
 
 @misc{cudaoxide,
   author = {{NVIDIA}},
-  title  = {cuda-oxide: The {Rust} + {GPU} Ecosystem (project documentation)},
+  title  = {The {Rust} + {GPU} Ecosystem (cuda-oxide documentation)},
   url    = {https://nvidia.github.io/cuda-rust/cuda-oxide/appendix/ecosystem.html},
   year   = {2026},
 }
 
 @misc{krokkos,
-  author = {{CEA}},
-  title  = {Krokkos: an experimental {Rust} {API} for {Kokkos} (conference contribution, February 2026)},
-  url    = {https://events.academiccloud.de/event/143/contributions/511/},
-  year   = {2026},
+  author       = {Chevalier, C{\'e}dric and Clisson, Rapha{\"e}l},
+  title        = {Krokkos, an experimental {Rust} {API} for {Kokkos}},
+  howpublished = {Talk at the HPSF Community Summit 2026, Technical University of Braunschweig, 25--27 February 2026},
+  url          = {https://events.academiccloud.de/event/143/contributions/511/},
+  year         = {2026},
 }
 
 @misc{lamellar,
   author = {{Pacific Northwest National Laboratory}},
   title  = {Lamellar: an asynchronous tasking runtime for {HPC} systems written in {Rust}},
-  url    = {https://github.com/pnnl/lamellar-runtime},
+  url    = {https://github.com/pnnl/lamellar},
   year   = {2026},
+}
+
+@misc{lamellarisc,
+  author       = {{Pacific Northwest National Laboratory}},
+  title        = {Lamellar: Enabling Memory-Safe Distributed {HPC} in {Rust}},
+  howpublished = {Invited talk, ISC High Performance 2026, Hamburg, 23 June 2026},
+  url          = {https://isc.app.swapcard.com/event/isc-high-performance-2026/planning/UGxhbm5pbmdfNDQyNzk0MQ==},
+  year         = {2026},
 }
 
 @misc{rsmpi,
@@ -216,7 +240,7 @@
 
 @misc{mlua,
   author = {{mlua contributors}},
-  title  = {mlua: High level bindings to {Lua} 5.5/5.4/5.3/5.2/5.1 (including {LuaJIT}) and {Luau}},
+  title  = {mlua: High level {Lua} 5.5/5.4/5.3/5.2/5.1 (including {LuaJIT}) and {Luau} bindings to {Rust} with async/await support},
   url    = {https://github.com/mlua-rs/mlua},
   year   = {2026},
 }
@@ -306,6 +330,7 @@
   number  = {1},
   pages   = {64--84},
   year    = {1989},
+  doi     = {10.1016/0021-9991(89)90035-1},
 }
 
 @article{p4est,
@@ -316,6 +341,7 @@
   number  = {3},
   pages   = {1103--1133},
   year    = {2011},
+  doi     = {10.1137/100791634},
 }
 
 @article{dmplex,
@@ -326,6 +352,7 @@
   number  = {3},
   pages   = {215--230},
   year    = {2009},
+  doi     = {10.1155/2009/948613},
 }
 
 @techreport{moab,
@@ -343,6 +370,8 @@
   volume  = {42},
   number  = {3},
   year    = {2016},
+  pages   = {1--28},
+  doi     = {10.1145/2814935},
 }
 
 @misc{omegah,
@@ -359,6 +388,8 @@
   volume  = {33},
   number  = {4},
   year    = {2022},
+  pages   = {842--853},
+  doi     = {10.1109/TPDS.2021.3084070},
 }
 
 @article{gmsh,
@@ -369,6 +400,7 @@
   number  = {11},
   pages   = {1309--1331},
   year    = {2009},
+  doi     = {10.1002/nme.2579},
 }
 
 @misc{blueprint,
@@ -394,7 +426,7 @@
 
 @misc{ruststaticlib,
   author = {{Rust Project}},
-  title  = {Rust staticlibs expose internal symbols (rust-lang/rust \#104707)},
+  title  = {Don't leak non-exported symbols from staticlibs (rust-lang/rust \#104707)},
   url    = {https://github.com/rust-lang/rust/issues/104707},
   year   = {2022},
 }
@@ -422,7 +454,7 @@
 
 @misc{juliac,
   author = {{JuliaLang}},
-  title  = {{JuliaC.jl}: compiling and bundling {Julia} binaries},
+  title  = {{JuliaC.jl}: {CLI} app for compiling and bundling {Julia} binaries},
   url    = {https://github.com/JuliaLang/JuliaC.jl},
   year   = {2026},
 }
@@ -450,14 +482,14 @@
 
 @misc{ghsecurity,
   author = {{GitHub}},
-  title  = {Security hardening for {GitHub Actions}},
-  url    = {https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions},
+  title  = {Secure use reference ({GitHub Actions})},
+  url    = {https://docs.github.com/en/actions/reference/security/secure-use},
   year   = {2026},
 }
 
 @misc{ecpci,
   author = {{Exascale Computing Project}},
-  title  = {{ECP CI} documentation: {Jacamar CI}},
+  title  = {{Jacamar CI} documentation},
   url    = {https://ecp-ci.gitlab.io},
   year   = {2026},
 }
@@ -476,10 +508,10 @@
   year   = {2026},
 }
 
-@misc{iaicallgrind,
-  author = {{iai-callgrind contributors}},
-  title  = {iai-callgrind: high-precision one-shot benchmarking for {Rust}},
-  url    = {https://github.com/iai-callgrind/iai-callgrind},
+@misc{gungraun,
+  author = {{Gungraun contributors}},
+  title  = {Gungraun (formerly iai-callgrind): high-precision, one-shot and consistent benchmarking framework for {Rust}},
+  url    = {https://github.com/gungraun/gungraun},
   year   = {2026},
 }
 
@@ -487,5 +519,40 @@
   author = {{libabigail contributors}},
   title  = {libabigail: the {ABI} Generic Analysis and Instrumentation Library},
   url    = {https://sourceware.org/libabigail/},
+  year   = {2026},
+}
+
+@misc{luaversions,
+  author = {{Lua.org}},
+  title  = {{Lua}: version history},
+  url    = {https://www.lua.org/versions.html},
+  year   = {2026},
+}
+
+@misc{mlgoal2026,
+  author = {{Rust Project}},
+  title  = {High-Level {ML} optimizations ({Rust} project goal, 2026)},
+  url    = {https://goals.rust-lang.org/2026/high-level-ml.html},
+  year   = {2026},
+}
+
+@misc{mpich5,
+  author = {{MPICH developers}},
+  title  = {{MPICH} 5.0.0 released},
+  url    = {https://www.mpich.org/2026/02/04/mpich-5-0-0-released/},
+  year   = {2026},
+}
+
+@misc{ompi6,
+  author = {{Open MPI developers}},
+  title  = {{Open MPI} v6.0.x series change log},
+  url    = {https://docs.open-mpi.org/en/main/release-notes/changelog/v6.0.x.html},
+  year   = {2026},
+}
+
+@misc{kokkosdocs,
+  author = {{Kokkos developers}},
+  title  = {{Kokkos} documentation: programming guide and {API} reference},
+  url    = {https://kokkos.org/kokkos-core-wiki/},
   year   = {2026},
 }
