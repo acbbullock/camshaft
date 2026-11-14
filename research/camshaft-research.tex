@@ -385,7 +385,7 @@ level.  Its speed is irrelevant if the next principle is followed.
 language compatible with \ref{req:perf} is that the script decides
 \emph{what} is computed and never performs the computation.  Lua should
 execute a number of operations proportional to the number of commands, tables
-and time steps, never to the number of cells or particles.  A user-supplied
+and cycles, never to the number of cells or particles.  A user-supplied
 expression that must be evaluated per element (an initial condition, a source
 term) is the one place this is hard, and there are three acceptable answers:
 evaluate it once on the host to fill a column; translate a restricted
@@ -501,10 +501,14 @@ local Particle = cam.type("pusher.Particle", {
   velocity = cam.vec3(cam.f64),
 }, { attributes = Species })
 
--- A parameter, a message, and the compiled kernel that answers it.
+-- A parameter and a message.  The message is sent once in every cycle.
 cam.param("pusher.cfl", cam.f64, { default = 0.5 })
-cam.message("pusher.advance")
-Particle:answers("pusher.advance", cam.kernel("boris"))  -- checked at load
+cam.message("pusher.advance", { schedule = "cycle" })
+
+-- The compiled kernels that answer the package's message and the core's
+-- request for a limit on the time step.  Both are checked at load.
+Particle:answers("pusher.advance", cam.kernel("boris"))
+Particle:answers("cam.propose_dt", cam.kernel("cfl_limit"))
 \end{lstlisting}
 
 The second is a driver script.
@@ -520,13 +524,16 @@ local electrons = pusher.Particle:table("electrons",
 electrons:create(1000000)
 
 -- A handler written in Lua: called once per event, never once per object.
-cam.on("step_end", function(ev)
-  if ev.step % 100 == 0 then
+cam.on("cycle_end", function(ev)
+  if ev.cycle % 100 == 0 then
     cam.write{ tables = {electrons}, format = "hdf5" }
   end
 end)
 
-cam.run{ until_time = 1.0e-6, dt = 1.0e-9 }
+-- No time step is given: the package proposes one in every cycle.  The run
+-- stops at whichever limit is reached first, and says which it was.
+local why = cam.run{ until_time = 1.0e-6, until_cycle = 100000 }
+if why == "until_cycle" then cam.checkpoint() end
 \end{lstlisting}
 
 The names in the sketches are placeholders, invented for a small example
@@ -549,11 +556,13 @@ Name & What it stands for \\
 \code{boris} & The compiled kernel, in the package's library, that answers \code{pusher.advance}.  It is named after the Boris algorithm, the usual pusher for charged particles in electric and magnetic fields~\cite{boris} \\
 \code{pusher.Particle} & A bulk type.  Each particle is a row, and \code{position} and \code{velocity} are its fields \\
 \code{pusher.Species} & A record type holding what all particles of one kind share: a name, a charge and a mass.  The driver supplies the values for the electron, in SI units \\
-\code{pusher.cfl} & An example of a package parameter.  It is named after the Courant--Friedrichs--Lewy number, a dimensionless limit on the size of a time step \\
-\code{pusher.advance} & A message asking a table of particles to advance by one time step \\
+\code{pusher.cfl} & An example of a package parameter.  It is named after the Courant--Friedrichs--Lewy number, a dimensionless limit on the size of a time step, and it scales the limit that \code{cfl\_limit} proposes \\
+\code{pusher.advance} & A message asking a table of particles to advance by one time step.  The package schedules it to be sent in every cycle \\
+\code{cam.propose\_dt} & Not a package's name but the core's: the standard message that asks for a limit on the next time step (Section~\ref{sec:cycles}) \\
+\code{cfl\_limit} & The compiled kernel that answers \code{cam.propose\_dt} with the largest time step the particles allow \\
 \code{tracer} & A field added by the user, not by the package: a label, say, for following chosen particles through the output \\
 \code{electrons} & A table of particles, with a name chosen by the user \\
-\code{step\_end} & An event that the core is assumed to emit at the end of every time step \\
+\code{cycle\_end} & The event that the core emits at the end of every cycle (Section~\ref{sec:cycles}) \\
 \code{schema.lua}, \code{run.lua} & File names, which are arbitrary \\
 \bottomrule
 \end{tabularx}
@@ -803,7 +812,7 @@ build in than to retrofit.
 \subsection{The event model}
 
 Everything that happens in \camshaft{} should be an event: a command arriving
-from the DSL, the beginning or end of a time step, a request to write output,
+from the DSL, the beginning or end of a cycle, a request to write output,
 a regridding trigger, a message that one package defines and another answers.
 An event has a message identifier, an optional target (a type, a table, a
 set of rows or a record) and a small payload.  The interpreter's main loop takes events
@@ -815,6 +824,100 @@ sequence of control events without communicating them.  Event ordering must
 therefore be deterministic.  Events that originate on one rank (a local error,
 a locally detected condition) need an explicit collective step before they
 become global events.
+
+\subsection{Cycles, time and the run loop}
+\label{sec:cycles}
+
+The \code{run} command drives an outer loop, and one pass of that loop is a
+\emph{cycle}.  The core owns a 64-bit cycle counter.  It is always present,
+it is identical on every rank, and it is stored in every checkpoint.  The
+count of cycles, and not simulation time, is the core's primary measure of
+progress, for four reasons.
+
+\begin{itemize}
+  \item \emph{Not every run has a physical time.}  A mesh generator, a
+        steady-state solve and an optimisation have iterations only.
+  \item \emph{The count is exact.}  Simulation time is a floating-point sum
+        of time steps and accumulates rounding error, so comparisons with it
+        need care.  A comparison of integers needs none.
+  \item \emph{With a time step that adapts, the two are not
+        interchangeable.}  Users want output every hundred cycles and also
+        every ten nanoseconds, a stop at a given time and also a stop after
+        a given number of cycles.
+  \item \emph{Tests want cycles.}  Running ten cycles and comparing the
+        result is cheap and repeatable.
+\end{itemize}
+
+\paragraph{Terms.}  A \emph{cycle} is one pass of the outer loop.  The
+\emph{time step} is the interval by which simulation time advances in a
+cycle.  The word \enquote{step} on its own is avoided, because it is used
+for both.  The core emits \code{cycle\_begin} and \code{cycle\_end} events,
+whose payload carries the cycle number.
+
+\paragraph{Time is a standard, optional clock.}  The core defines a record
+type (Section~\ref{sec:records}) holding the simulation time and the time
+step.  An instance of it exists when a loaded package declares that it
+integrates in time; otherwise a run has cycles and nothing else.  A package
+that subcycles keeps inner counters of its own, and the clock describes the
+outer cycle only.  The clock is stored in checkpoints with the counter.
+
+\paragraph{Choosing the time step.}  Unless the driver fixes the time step,
+the core asks for it in every cycle through a standard message,
+\code{cam.propose\_dt}.  Each handler bound to that message returns the
+largest time step its table can accept.  The message declares that its
+results combine by taking the minimum (Section~\ref{sec:mechanism}), so the
+core obtains the smallest proposal over all tables and all ranks in one
+collective reduction.  It applies any upper bound the driver gave, writes
+the result to the clock, and handlers read it from there.  If the driver
+fixes the time step, no proposals are requested.
+
+\paragraph{The sequence of a cycle.}  A cycle is a standard sequence of
+events.
+
+\begin{enumerate}
+  \item \code{cycle\_begin} is emitted.
+  \item The time step is chosen, when there is a clock.
+  \item The messages that packages have scheduled in the cycle are sent.  A
+        package schedules a message when it declares it.  The order among
+        packages is the driver's to set, and defaults to the order in which
+        the packages were loaded.
+  \item The clock is advanced and the cycle counter is incremented.
+  \item \code{cycle\_end} is emitted.
+  \item The stop conditions are tested.
+\end{enumerate}
+
+The adaptation sequence of Section~\ref{sec:mesh-change} runs between
+cycles.
+
+\paragraph{Stopping.}  \code{run} takes several stop conditions, stops at
+the first one that is met, and returns which it was, so that the driver can
+act on it.
+
+\begin{itemize}
+  \item \code{until\_cycle} and \code{until\_time} are absolute limits.
+        \code{for\_cycles} and \code{for\_time} are relative to the state
+        when \code{run} was called.  The difference matters because a driver
+        may call \code{run} more than once and may start from a checkpoint.
+        With absolute limits, a restarted run ends where the original would
+        have.
+  \item \code{wall\_clock} limits elapsed real time, so that a run can write
+        a checkpoint before its allocation on a machine ends.
+  \item A package may raise a condition of its own, such as convergence,
+        through a message whose results combine by logical conjunction.
+\end{itemize}
+
+The last two can differ between ranks.  They are decided collectively, in
+the reduction that chooses the time step or in one like it, so that every
+rank stops after the same cycle, as Section~\ref{sec:dispatch} requires of
+any event that originates on one rank.
+
+\paragraph{Landing exactly.}  When a limit on time is set, the last time
+step is shortened so that the run ends at that time exactly.  The core
+should also provide triggers at intervals of simulation time, since testing
+\code{ev.cycle \% n} in a handler serves only intervals of cycles.  Such a
+trigger fires when the time passes the $k$-th multiple of its interval, for
+an integer $k$ that the core keeps, and not when an accumulated sum reaches
+it.
 
 \subsection{The cost of dynamic dispatch, and where to pay it}
 
@@ -844,6 +947,7 @@ makes columnar storage and message dispatch fit together: grouping objects by
 type into tables is exactly what turns a million dynamic dispatches into one.
 
 \subsection{Mechanism}
+\label{sec:mechanism}
 
 \paragraph{Dynamic layer.}  The registry holds a table mapping
 \emph{(message identifier, type identifier)} to a handler.  A handler is a C
@@ -852,6 +956,14 @@ every language can supply.  Both identifiers are small integers assigned at
 registration, so lookup is an array index or a single hash probe.  The lookup
 result can be cached in the event's call list, as LAMMPS does, so steady-state
 time stepping performs no lookups at all.
+
+\paragraph{Results.}  A message may declare a result, and a rule for
+combining results: minimum, maximum, sum, or a logical conjunction or
+disjunction.  Each handler stores one value for its table, computed however
+it likes (by a parallel reduction on a device, for instance).  The core
+combines the values over the tables of a rank and then over ranks, in one
+collective reduction.  The time-step proposal and the stop conditions of
+Section~\ref{sec:cycles} both use this.
 
 Three extensions should be anticipated in the table's design even if they are
 not built at first: handlers selected by more than one type (multiple
@@ -1168,7 +1280,7 @@ no force; it is not the Boris algorithm.  \code{cam\_batch} stands for what
 a handler is given: a range of rows of one table, together with the columns
 the handler declared.  \code{cam::view} is the adapter function that wraps
 a column as an unmanaged view, and \code{cam\_batch\_dt} reads the time step
-from the event's payload.  \code{cam\_status}, \code{CAM\_OK} and
+that the core chose for the current cycle (Section~\ref{sec:cycles}).  \code{cam\_status}, \code{CAM\_OK} and
 \code{CAM\_ERROR\_PACKAGE} are the return codes of Section~\ref{sec:api}.
 \code{camshaft.h} is the generated C header and \code{camshaft\_kokkos.hpp}
 is the adapter's header.
@@ -2043,7 +2155,9 @@ through every milestone from M1.
         hand-written implementation.
   \item[M2. Events and dispatch.]
         Event queue; message and handler registration; per-table dispatch
-        with cached call lists.  Table version counters and invalidation of
+        with cached call lists.  The run loop of Section~\ref{sec:cycles}:
+        the cycle counter, the clock, messages with combined results, the
+        time-step proposal, and stop conditions, absolute and relative.  Table version counters and invalidation of
         cached lists.  The adaptation sequence of
         Section~\ref{sec:mesh-change} on the block-based mesh, with transfer
         maps and per-field transfer rules; dispatch of one message to the
@@ -2059,7 +2173,7 @@ through every milestone from M1.
         arguments on definitions; the machine-readable description; the
         reference pages and the editor definition file rendered from it
         (Section~\ref{sec:docs}).
-        \emph{Measure:} time spent in Lua per time step for a realistic
+        \emph{Measure:} time spent in Lua per cycle for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
         Generate the header; load a plugin from a shared library; write the
@@ -2468,6 +2582,7 @@ Scripts & Definition scripts owned by packages and driver scripts owned by users
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
 Configuration objects & Records: same schema as bulk types, stored on the host and replicated on every rank; fixed-width fields reach kernels by value or through generated look-up tables; tables carry a record of attributes \\
 Dispatch & Dynamic per table through a (message, type, device) table; static within kernels \\
+Run loop & A cycle counter owned by the core as the primary measure of progress; simulation time as an optional clock; the time step chosen each cycle as the minimum of the packages' proposals; several stop conditions, absolute and relative, with the one that fired returned to the driver \\
 GPU strategy & The infrastructure owns memory and scheduling; kernels are opaque and may come from any toolchain \\
 Meshes & Tables plus declared relations (fixed and offsets-and-indices), index spaces across element types, table versions and transfer maps for adaptation, one ghost-to-owner communication primitive; mesh semantics in a separate protocol, not in the core \\
 Physics packages & Expected in C++ with Kokkos; served by an optional adapter (unmanaged views, life-cycle hooks, Kokkos-backed allocator) outside the core \\
