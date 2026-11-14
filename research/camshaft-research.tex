@@ -7,6 +7,7 @@
 \usepackage{microtype}
 \usepackage{booktabs}
 \usepackage{tabularx}
+\usepackage{xltabular}
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage{listings}
@@ -695,7 +696,8 @@ package through the API.  For each type the registry should record:
   \item a stable identifier, derived from the qualified name, so that
         checkpoints and separately compiled plugins agree on it;
   \item for each field, its name, element type, shape (scalar, fixed-size
-        vector or tensor), and physical dimension and unit, if any;
+        vector or tensor), and its kind of quantity, dimension and unit, if
+        any (Section~\ref{sec:units});
   \item for each field, its constraints: whether it is required, its
         default, its permitted range or values, and whether it is deprecated
         (Section~\ref{sec:validation});
@@ -782,6 +784,158 @@ with the size of the problem or with the length of the input file.  The
 first is a bulk type and the second is a record.  Materials and species lie
 between the two, and for them the answer is a record together with a
 generated look-up table.
+
+\subsection{Kinds of quantity, dimensions and systems of units}
+\label{sec:units}
+
+A field that holds a physical quantity states what kind of quantity it is,
+and takes its unit from a system of units.  The terms are those of the
+international vocabulary of metrology~\cite{vim}, and they are used strictly
+from here on.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Kind of quantity.]
+        What the quantity is: a length, an energy, a pressure.  The registry
+        holds named kinds, and a field states one.
+  \item[Dimension.]
+        The product of powers of base dimensions (length, mass, time and the
+        rest) that a kind of quantity has.  Quantities of the same kind have
+        the same dimension, but not the reverse: energy and moment of force
+        share a dimension, and so do frequency and angular velocity.
+  \item[Unit.]
+        The reference in which a value is expressed: the metre, the
+        megabar.
+  \item[System of units.]
+        A choice of base units, one for each base dimension.  Every other
+        unit then follows as a product of powers of the base units with no
+        further factor, and is called \emph{coherent}.
+  \item[System of quantities.]
+        The quantities together with the equations that relate them.  The
+        International System of Quantities, on which the SI is built, and
+        the Gaussian system are different systems of quantities, not merely
+        different systems of units.
+\end{description}
+
+\paragraph{The model.}  A field states its kind of quantity, and its unit is
+the coherent unit of that kind in the package's system of units.
+Table~\ref{tab:unitsystems} shows what follows for pressure in three systems.
+The third, centimetre--gram--microsecond, is common in shock hydrodynamics
+and is in no library's built-in list.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{@{}l l l l l@{}}
+\toprule
+System of units & Length & Mass & Time & Coherent unit of pressure \\
+\midrule
+SI & m & kg & s & Pa \\
+Centimetre--gram--second & cm & g & s & $0.1$\,Pa (the barye) \\
+Centimetre--gram--microsecond & cm & g & \textmu s & $10^{11}$\,Pa (the megabar) \\
+\bottomrule
+\end{tabular}
+\caption{Three systems of units and the unit of pressure that follows from each.}
+\label{tab:unitsystems}
+\end{table}
+
+Five refinements make the model usable.
+
+\begin{enumerate}
+  \item \textbf{Dimensions are checked; kinds are named.}  The check applied
+        to a value is on its dimension, which is what the established
+        libraries for units check~\cite{boostunits,pint,unitful,mpunits}.
+        The kind of quantity serves documentation and supplies the default
+        unit.
+  \item \textbf{Plane angle is a base dimension.}  The SI treats plane angle
+        as dimensionless~\cite{sibrochure}.  \camshaft{} should not, so that
+        degrees given where radians are expected are caught.
+  \item \textbf{A field may state its unit explicitly.}  Real codes are not
+        coherent throughout: an energy may be kept in electronvolts, a
+        length in parsecs.  A field that names a unit keeps it; a field that
+        does not takes the coherent one.
+  \item \textbf{A system of units is data.}  It is a record
+        (Section~\ref{sec:records}) giving the size of each base unit
+        relative to the SI.  That admits systems no library ships, and
+        normalised systems whose reference scales are computed from the
+        parameters of a run.
+  \item \textbf{Physical constants belong to the system of units.}  The core
+        supplies constants such as the Boltzmann constant, expressed in the
+        system in force, from a versioned set (the CODATA 2022
+        values~\cite{codata} at the time of writing) whose version is
+        recorded in the output.  Kernels then contain no constants of their
+        own.
+\end{enumerate}
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- A system of units is a record: the size of each base unit in SI units.
+cam.system_of_units("cm-g-us", { length = 1.0e-2, mass = 1.0e-3, time = 1.0e-6 })
+
+-- In a package's definition script: its default, and whether a driver may
+-- choose another.
+cam.units{ system = "SI", agnostic = false }
+
+local Species = cam.record("pusher.Species", {
+  name   = cam.string,
+  mass   = cam.f64{ kind = "mass" },                 -- kilograms, from the system
+  energy = cam.f64{ kind = "energy", unit = "eV" },  -- an explicit unit
+})
+\end{lstlisting}
+
+\paragraph{Systems of units and systems of quantities.}  Two different
+things are commonly both called a \enquote{unit system}, and only one of
+them can be handled automatically.
+
+\begin{itemize}
+  \item \emph{Changing the system of units is arithmetic.}  Going from
+        centimetre--gram--second to the SI, or to
+        centimetre--gram--microsecond, multiplies each value by a factor
+        that follows from its dimension.  The core can do this for any
+        field.
+  \item \emph{Changing the system of quantities is not.}  Electromagnetism
+        in the SI and in the Gaussian system differs in the equations
+        themselves, by factors of $4\pi$ and of the speed of light, and
+        electric charge has a different dimension in each.  Measuring
+        temperature in units of energy is a convention of the same sort.
+        The convention is built into a package's kernels, so the core cannot
+        convert between systems of quantities generically.
+\end{itemize}
+
+A package therefore declares the system of quantities its kernels assume.
+Conversion between systems of quantities is an explicit, named operation
+that a package supplies, and is never implicit.
+
+\paragraph{Who chooses the system of units.}  A package declares its default
+system of units in its definition script.  It also declares whether it is
+\emph{unit-agnostic}, meaning that its kernels take every constant from the
+core and assume nothing about units.  Only for a unit-agnostic package may
+the driver choose another system of units.  LAMMPS works this way: its
+\code{units} command, given in the input script, selects one of several
+styles that determine the units of every quantity~\cite{lammpsunits}.
+
+\paragraph{Several systems of units in one run.}  Packages in one run need
+not share a system of units.  Each column is stored in the unit its owner
+declared.  A kernel declares the unit it expects of every column it uses,
+and the binding check refuses a mismatch when the package is loaded
+(Section~\ref{sec:validation}).  A mesh package in centimetres and a physics
+package in metres can therefore coexist so long as no kernel reads a column
+in a unit it did not expect.  Where two such packages must share a column,
+one of them must be unit-agnostic, or a conversion must be requested
+explicitly.  The core may offer that conversion as a bulk operation, and
+never applies it unasked.
+
+\paragraph{Where units are enforced.}  Units are metadata on columns and on
+the fields of records.  A kernel sees plain numbers and pays nothing.  The
+checks are made at the two boundaries: when a value enters a record
+(Section~\ref{sec:validation}) and when a kernel is bound.  A package is
+free to use a units library inside its own kernels as well.
+
+\paragraph{Files.}  Output files and checkpoints record, for every field,
+its unit and the size of that unit relative to the SI.  Unit strings follow
+an existing grammar, that of UDUNITS, which the CF conventions for NetCDF
+files prescribe~\cite{cfconventions}, and not one invented here.  A
+checkpoint written under one system of units can be read under another,
+since the conversion is arithmetic on recorded factors.  One written under
+another system of quantities is refused.
 
 \subsection{Compatibility with Apache Arrow}
 
@@ -2170,16 +2324,15 @@ cam.param("pusher.cfl", cam.f64, {
 })
 \end{lstlisting}
 
-\subsection{Units}
+\subsection{Units in driver scripts}
 
-A definition script declares the physical dimension and the unit of each
-field that has one.  A package may also declare a system of units once, and
-a field that states only its dimension then takes its unit from that
-system.  Three rules govern what a driver may write.
+Section~\ref{sec:units} sets out the model: a field states its kind of
+quantity and takes its unit from the package's system of units, unless it
+names a unit explicitly.  Three rules govern what a driver may write.
 
 \begin{enumerate}
-  \item \textbf{A bare number is in the field's declared unit.}  Driver
-        scripts are not required to attach units to quantities.
+  \item \textbf{A bare number is in the field's unit.}  Driver scripts are
+        not required to attach units to quantities.
   \item \textbf{An explicit quantity is converted.}  A value given with a
         unit of the right dimension is converted to the field's unit when
         it enters the record.
@@ -2187,19 +2340,20 @@ system.  Three rules govern what a driver may write.
 \end{enumerate}
 
 \begin{lstlisting}[language={[5.3]Lua}]
--- pusher.Species declares mass as a mass, in kilograms.
+-- pusher.Species declares mass as a mass.  The package's system of units is
+-- the SI, so the field's unit is the kilogram.
 { name = "electron", mass = 9.109e-31 }                     -- kilograms
 { name = "electron", mass = cam.quantity(9.109e-28, "g") }  -- converted
 { name = "electron", mass = cam.quantity(1.0, "m") }        -- rejected
 \end{lstlisting}
 
 Conversion happens in the control plane, where a value enters a record.
-Columns are stored in their declared units and nothing is converted inside
-a kernel.  Between packages the same principle is applied one stage
-earlier: a kernel's declaration of a column may state the unit it expects,
-the binding check compares it with the column's unit when the package is
-loaded, and a mismatch is an error then.  Output files and checkpoints
-record the units of what they hold.
+Columns are stored in their units and nothing is converted inside a kernel.
+Between packages the same principle is applied one stage earlier: a kernel
+declares the unit it expects of a column, the binding check compares it
+with the column's unit when the package is loaded, and a mismatch is an
+error then.  A value given in a unit that belongs to another system of
+quantities is rejected in the same way, since no factor converts it.
 
 \subsection{Strict script environments}
 \label{sec:strict}
@@ -2364,10 +2518,13 @@ cycle on which its message is first sent.
         Section~\ref{sec:validation} promises a great deal of a check that
         takes seconds.  A driver is a program, so the check covers the path
         it executes and not every path.  A handler called with a synthetic
-        event may behave differently from one called in a real run.  And the
-        treatment of units is only outlined: derived units, and the
-        normalised or dimensionless systems that many physics codes use,
-        need a design of their own.
+        event may behave differently from one called in a real run.  And parts of the treatment of units in Section~\ref{sec:units} are
+        untried.  A normalised system of units whose scales are computed
+        from the parameters of a run exists only once the driver has been
+        evaluated, which moves some unit checks from the definition check to
+        the driver check.  Conversions between systems of quantities are
+        left to packages, and whether packages will supply them
+        consistently is unknown.
   \item \label{risk:mesh} \textbf{Meshes.}  Section~\ref{sec:mesh} argues
         that tables with declared relations can represent every mesh family,
         but several points rest on argument and not measurement: whether
@@ -2422,8 +2579,10 @@ through every milestone from M1.
         local script for tier~3.
   \item[M1. Schema and store, host only.]
         Run-time type registry with namespaces and both storage classes;
-        field constraints, dimensions and units, and the one validator that
-        reads them (Section~\ref{sec:validation});
+        field constraints and the one validator that reads them
+        (Section~\ref{sec:validation}); kinds of quantity, dimensions,
+        systems of units as records, and physical constants supplied in the
+        system in force (Section~\ref{sec:units});
         tables with aligned columns; records and table attributes; a look-up
         table generated from records; creation and deletion of rows; Arrow C
         data interface export and import.
@@ -2863,12 +3022,14 @@ This report remains the design record and belongs to neither pipeline.
 %------------------------------------------------------------------------------
 \section{Summary of recommendations}
 
-\begin{center}
-\small
-\begin{tabularx}{\textwidth}{@{}l L@{}}
+{\small
+\begin{xltabular}{\textwidth}{@{}>{\raggedright\arraybackslash}p{32mm} L@{}}
 \toprule
 Question & Recommendation \\
 \midrule
+\endhead
+\bottomrule
+\endfoot
 Core language & Rust, on the stable compiler \\
 Interface language & C ABI, header generated from the Rust source \\
 User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined to the control plane \\
@@ -2885,15 +3046,15 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
 Testing & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
 Build system & Cargo for the core, with an explicit installation step; CMake for C++ and Fortran bindings and packages against the installed library; Spack for distribution \\
 Deferred & WebAssembly components for sandboxed extensions; Rust-specific stable ABIs \\
-\bottomrule
-\end{tabularx}
-\end{center}
+\end{xltabular}
+}
 
 \printbibliography
 
