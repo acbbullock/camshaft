@@ -66,6 +66,10 @@ plane.  User objects should be stored column-wise in tables whose buffers are
 layout-compatible with Apache Arrow, so that they can be handed to any
 language and any device without copying.  Dispatch should be dynamic at the
 granularity of whole tables and static inside the kernels that process them.
+Package developers define their types in definition scripts and users drive
+runs with driver scripts; the two are separated by role and privilege, not by
+interpreter modes, and configuration objects share the schema of bulk data
+but not its storage.
 The foundation of the public API should be a small, versioned C interface,
 with idiomatic bindings for Rust, C++, Fortran, Python and Julia layered on
 top.  Physics packages are expected to be written mostly in C++ with Kokkos.
@@ -385,32 +389,138 @@ evaluate it once on the host to fill a column; translate a restricted
 expression into a kernel; or require a compiled plugin.  Calling back into Lua
 from inside a kernel is not acceptable, and is impossible on a GPU.
 
+\subsection{Definition scripts and driver scripts}
+\label{sec:scripts}
+
+Two kinds of people write \camshaft{} scripts.  The developer of a mesh or
+physics package writes scripts that \emph{define} things: the package's types
+and their fields, its configuration objects and parameters, its messages, and
+the compiled kernel that answers each message.  The user of those packages
+writes scripts that \emph{drive} a run: they create objects of types that
+already exist, set parameters and issue commands.  The two have different
+owners and different lifetimes.  A definition must stay in step with compiled
+code and changes when the package changes; a driver changes with every run.
+Cactus draws the same line: each thorn ships declarative files describing
+its variables, parameters and schedule, and the user's parameter file can
+only set and select~\cite{cactus}.
+
+\paragraph{Separation by role and privilege, not by mode.}  One way to keep
+the two apart would be to give the interpreter modes (a definition mode, a
+generation mode, an execution mode) and to switch between them.  That is
+fragile.  When the meaning or legality of a statement depends on hidden
+state, errors come to depend on the order of statements.  LAMMPS input
+scripts have this property: its documentation notes that some commands are
+valid only when they follow others~\cite{lammpsdocs}.  The separation should
+instead be enforced by what a script is \emph{able to call}.  Lua loads each
+script with an environment of its own.  A script loaded in the definition
+role is given the functions that define, and none that create objects or
+advance a run.  A script loaded in the driver role is given the commands,
+and cannot alter a type that belongs to a package.  The role is decided by
+how the script is loaded, not by anything written in it: a package names its
+definition scripts, and the command line names the driver.  Both roles use
+the same language and the same \code{cam} module, with different contents.
+
+\paragraph{Creation is not a phase.}  Objects are created during a run as
+well as before it: particles are injected, meshes are refined, restart files
+are read.  Creating objects is therefore an ordinary command in the event
+stream.  There is no \enquote{generation} stage, and a driver may run, create
+and run again.
+
+\paragraph{Rules.}  Five rules follow.
+
+\begin{enumerate}
+  \item \textbf{The definition script is the single source of truth, and it
+        is shipped with the package.}  It is embedded in the plugin, or a
+        hash of it is checked when the plugin is loaded, so that the script
+        and the compiled code cannot drift apart.  The rule is one source of
+        truth per package.  A Rust package compiled into the core may derive
+        its definitions from Rust types (Section~\ref{sec:language})
+        instead, in which case those types are the source; the registry
+        holds the same information either way.
+  \item \textbf{Definition scripts can be evaluated offline.}  They need no
+        MPI, no device and no simulation, and their only effect is to fill
+        the registry.  This is what makes tools possible: generating a typed
+        header for C++ or Fortran from a package's definitions, printing
+        documentation for its types and parameters, and validating a driver
+        script without running it.
+  \item \textbf{Bindings are checked once, when the package is loaded.}  A
+        compiled kernel declares the columns it reads and writes, with their
+        types (Section~\ref{sec:device-memory}).  When the handler is bound,
+        the core checks that declaration against the schema and resolves
+        names to column handles.  Nothing is looked up or checked inside a
+        kernel.  A mismatch is an error at load time that names the package,
+        the type and the field.  With a header generated under rule~2, the
+        Kokkos adapter's accessors can be typed at compile time as well, and
+        the look-ups by name in the sketch of Section~\ref{sec:kokkos}
+        disappear.
+  \item \textbf{Ownership rules replace a schema freeze.}  Every type belongs
+        to a namespace, owned by whoever defined it.  New types may be
+        defined at any time, including by a driver in its own namespace.  A
+        driver or another package may \emph{add} fields to an existing type
+        (a tracer, a diagnostic); because kernels bind to columns by name,
+        an added column disturbs none of them.  Nobody may change or remove
+        a field of a type they do not own once objects of it exist, and the
+        owner does so only through the schema version and a migration
+        (Section~\ref{sec:schema-record}).
+  \item \textbf{Modes belong to the invocation, not to the script.}  The
+        executable, and the library entry points beneath it
+        (Section~\ref{sec:build}), offer at least four: run a driver; check
+        it, which evaluates the definitions and the driver and validates
+        every command without executing any; describe a package, which
+        prints its types, fields, parameters and messages; and generate
+        headers.
+\end{enumerate}
+
 \subsection{What the DSL might look like}
 
-The sketch below is illustrative only.  It shows the three things the DSL has
-to express: schema definitions, message handlers and commands.
+The two sketches below are illustrative only.  Between them they show what
+the DSL has to express: type definitions, parameters, message bindings and
+commands.  In both, \code{cam} is supplied by the environment the script is
+loaded with.  The first is a definition script.  It uses the vocabulary of
+Section~\ref{sec:vocab} and the record types of Section~\ref{sec:records}.
 
 \begin{lstlisting}[language={[5.3]Lua}]
-local cam = require "camshaft"
+-- pusher/schema.lua: definition role, shipped with the package.
 
--- Schema: a new kind of object, stored column-wise.
-local Particle = cam.define("Particle", {
-  position = cam.vec3(cam.f64),
-  velocity = cam.vec3(cam.f64),
-  mass     = cam.f64,
-  species  = cam.u16,
+-- A record type: configuration, held on the host, identical on every rank.
+local Species = cam.record("pusher.Species", {
+  name   = cam.string,
+  charge = cam.f64,
+  mass   = cam.f64,
 })
 
--- Dispatch: bind a message to a compiled kernel supplied by a package.
-Particle:on("advance", cam.kernel("pusher", "boris"))
+-- A bulk type: objects are rows, fields are columns.  Every table of this
+-- type carries one Species record as its attributes.
+local Particle = cam.type("pusher.Particle", {
+  position = cam.vec3(cam.f64),
+  velocity = cam.vec3(cam.f64),
+}, { attributes = Species })
 
--- Dispatch: a handler written in Lua, called once per event, not per object.
+-- A parameter, a message, and the compiled kernel that answers it.
+cam.param("pusher.cfl", cam.f64, { default = 0.5 })
+cam.message("pusher.advance")
+Particle:answers("pusher.advance", cam.kernel("boris"))  -- checked at load
+\end{lstlisting}
+
+The second is a driver script.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- run.lua: driver role, written by the user.
+local pusher = cam.use("pusher")      -- loads the plugin and its definitions
+
+pusher.Particle:extend{ tracer = cam.u32 }   -- adding a field is allowed
+
+local electrons = pusher.Particle:table("electrons",
+  { name = "electron", charge = -1.602e-19, mass = 9.109e-31 })
+electrons:create(1000000)
+
+-- A handler written in Lua: called once per event, never once per object.
 cam.on("step_end", function(ev)
-  if ev.step % 100 == 0 then cam.write{ tables = {Particle}, format = "hdf5" } end
+  if ev.step % 100 == 0 then
+    cam.write{ tables = {electrons}, format = "hdf5" }
+  end
 end)
 
--- Commands.
-local electrons = Particle:create(1000000)
 cam.run{ until_time = 1.0e-6, dt = 1.0e-9 }
 \end{lstlisting}
 
@@ -420,7 +530,7 @@ cam.run{ until_time = 1.0e-6, dt = 1.0e-9 }
 
 \subsection{Rows or columns}
 
-A \enquote{user object} could be stored as a record (all of its fields
+A \enquote{user object} could be stored as a structure (all of its fields
 together, an array of structures) or as a row in a set of parallel columns (a
 structure of arrays).  For this project the choice is forced.  SIMD units and
 GPUs both want one contiguous array per field; a kernel that touches two
@@ -438,12 +548,81 @@ unit at which Section~\ref{sec:dispatch} proposes to dispatch.  Neither is
 suitable for direct use, since neither manages device memory or distributed
 data, but their table layouts and query models are directly applicable.
 
+\subsection{Types, fields, tables, rows and columns}
+\label{sec:vocab}
+
+The word \enquote{class} promises more than the store provides, so the terms
+are fixed here.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Type.]
+        A named list of fields, such as \code{pusher.Particle}.  It is a
+        description held in the registry and nothing more: it contains no
+        data and no behaviour.  The nearest familiar things are a
+        \code{struct} declaration and the definition of a database table.
+  \item[Field.]
+        One named member of a type.  It has a name, an element type
+        (\code{f64}, \code{u32}), a shape (a scalar, a fixed-size vector or
+        tensor, or a relation to another table) and the metadata listed in
+        Section~\ref{sec:schema-record}.
+  \item[Table.]
+        The storage for objects of one type.  A type may have several
+        tables: electrons and ions are two tables of one particle type.  A
+        handler is selected by type and invoked once for each table
+        (Section~\ref{sec:dispatch}).
+  \item[Row.]
+        One object.  An object is not a block of memory.  It is an index
+        that is valid in every column of its table.
+  \item[Column.]
+        All the values of one field, across every row of a table, in one
+        contiguous buffer.  Columns are what a kernel receives.
+\end{description}
+
+\begin{lstlisting}
+type pusher.Particle         table "electrons", three rows
+  position : vec3(f64)         position  [ x0 y0 z0 | x1 y1 z1 | x2 y2 z2 ]
+  mass     : f64               mass      [ m0       | m1       | m2       ]
+                                           row 0      row 1      row 2
+\end{lstlisting}
+
+\enquote{The mass of particle~1} is \code{mass[1]}.  A row index is not an
+identity, because rows are renumbered, compacted and migrated
+(Section~\ref{sec:relations}); an object that needs a permanent identity has
+a column holding a global identifier.
+
+Table~\ref{tab:oo} relates these terms to the object-oriented ones that
+package developers will bring with them, and states where each
+correspondence stops.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{27mm} >{\raggedright\arraybackslash}p{36mm} L@{}}
+\toprule
+Object-oriented term & \camshaft{} term & Where the correspondence stops \\
+\midrule
+Class & Type & A type describes data only.  There is no inheritance; types are related through declared relations between tables \\
+Member variable & Field & Stored as a column, apart from the object's other fields.  There are no private members: any package may use a field by declaring that it reads or writes it \\
+Instance & Row & A row has no address and no lifetime of its own.  It is identified by its table and an index that can change \\
+Method & Handler bound to a message for a type & Called once per table with a range of rows, not once per object.  The body is a compiled kernel, and there is no per-object virtual call \\
+Static member & Table attribute (Section~\ref{sec:records}) & One value shared by all the rows of a table, not by every object of the type \\
+Constructor, destructor & Commands that create and delete rows & Bulk operations on a table.  Initial values are written by a handler or by filling columns \\
+\bottomrule
+\end{tabularx}
+\caption{Object-oriented terms and their \camshaft{} counterparts.}
+\label{tab:oo}
+\end{table}
+
 \subsection{What a schema must record}
+\label{sec:schema-record}
 
 A type definition in \camshaft{} is run-time data, created by the DSL or by a
 package through the API.  For each type the registry should record:
 
 \begin{itemize}
+  \item its namespace, which determines who owns it
+        (Section~\ref{sec:scripts}), and its storage class, bulk or record
+        (Section~\ref{sec:records});
   \item a stable identifier, derived from the qualified name, so that
         checkpoints and separately compiled plugins agree on it;
   \item for each field, its name, element type, shape (scalar, fixed-size
@@ -462,6 +641,73 @@ that need variable-length data can refer to rows in another table.  Such
 references are essential for meshes, and Section~\ref{sec:relations} makes
 them a declared kind of column, including a variable-length form built from
 two fixed-width buffers.
+
+\subsection{Records: configuration objects}
+\label{sec:records}
+
+Not everything a package defines is bulk data.  A solver, a material, a
+boundary condition and an output request are objects too, but there are few
+of them and they mostly hold parameters.  They could be stored as tables
+with one row for each instance, so that everything is a table.  That is
+rejected, because configuration objects need what the store forbids and use
+nothing the store provides.
+
+\begin{itemize}
+  \item \emph{They need variable-length data}: names, file paths, lists,
+        nested settings, references to functions.  Admitting those to tables
+        would complicate renumbering, migration and device mirroring for
+        every bulk table.
+  \item \emph{They are replicated, not partitioned.}  Every MPI rank holds
+        an identical copy, whereas a table is divided among ranks, with
+        owners and ghosts.
+  \item \emph{No kernel loops over them.}  Device buffers, alignment and
+        spare capacity are pointless for three instances that are read once
+        per event.
+\end{itemize}
+
+Existing frameworks keep the same division: Cactus between a thorn's
+parameters and its grid variables, MOOSE between its objects and its
+variables, Parthenon between a package's parameters and its
+fields~\cite{cactus,moose,parthenon}.  What \camshaft{} can add is one schema
+over both sides.  The design is as follows.
+
+\begin{enumerate}
+  \item \textbf{One registry, two storage classes.}  A type is declared
+        either as \emph{bulk} or as a \emph{record}.  Objects of a bulk type
+        are rows in tables: fixed-width fields only, able to live on a
+        device, partitioned among ranks.  Objects of a record type are held
+        on the host, replicated on every rank, and may contain strings,
+        lists and nested records.
+  \item \textbf{Everything else is shared.}  Both kinds use the same
+        definition syntax, the same field metadata (name, type, unit,
+        default, documentation), stable identifiers, schema versions,
+        persistence and introspection.  Both can receive messages: a handler
+        bound to a record type is called once for each record.  Records are
+        changed only by commands, which every rank processes in the same
+        order (Section~\ref{sec:dispatch}), so they stay identical without
+        being communicated.  A package's parameters are the fields of a
+        record type that has a single instance.
+  \item \textbf{What a kernel sees of a record is fixed-width.}  It reaches
+        the kernel in one of two ways.  For one record per call (a solver's
+        tolerance), the fixed-width fields are passed by value with the
+        call, as a small plain structure.  For a look-up per element (cells
+        that each hold a material index), the fixed-width fields of a set of
+        records are generated into an ordinary bulk table, which rows refer
+        to through a relation and which can live on a device.  The generated
+        table is rebuilt when its records change, using the version counters
+        of Section~\ref{sec:mesh-change}.
+  \item \textbf{Tables carry attributes.}  A table may have one record
+        attached to it, holding values shared by all of its rows, such as
+        the charge and mass of a particle species.  The type declares which
+        record type its tables carry, and a handler receives the attributes
+        with the batch of rows.
+\end{enumerate}
+
+The test for a package developer is whether the number of instances grows
+with the size of the problem or with the length of the input file.  The
+first is a bulk type and the second is a record.  Materials and species lie
+between the two, and for them the answer is a record together with a
+generated look-up table.
 
 \subsection{Compatibility with Apache Arrow}
 
@@ -486,6 +732,7 @@ Arrow or DLPack (which includes NumPy, CuPy, PyTorch, cuDF and Julia) can view
 \camshaft{} data in place.  It directly serves \ref{req:port} and \ref{req:lang}.
 
 \subsection{Device memory}
+\label{sec:device-memory}
 
 Each column should own up to two buffers, one on the host and one on a device,
 with flags recording which is current.  This is the pattern Kokkos calls a
@@ -503,7 +750,8 @@ concurrently without the package author writing any threading code.
 \subsection{Persistence}
 
 The schema carries enough information to write and read any table without
-package-specific code.  HDF5 and ADIOS2 are the obvious targets; both are C
+package-specific code, and the same holds for records, which are written
+with the tables they configure.  HDF5 and ADIOS2 are the obvious targets; both are C
 libraries with C interfaces.  Checkpoint and restart should be designed with
 the store, not added afterwards, because schema versioning is much easier to
 build in than to retrofit.
@@ -517,8 +765,8 @@ build in than to retrofit.
 Everything that happens in \camshaft{} should be an event: a command arriving
 from the DSL, the beginning or end of a time step, a request to write output,
 a regridding trigger, a message that one package defines and another answers.
-An event has a message identifier, an optional target (a type, a table or a
-set of rows) and a small payload.  The interpreter's main loop takes events
+An event has a message identifier, an optional target (a type, a table, a
+set of rows or a record) and a small payload.  The interpreter's main loop takes events
 from a queue and dispatches them.
 
 In a distributed run, the natural arrangement is for every MPI rank to run
@@ -798,7 +1046,10 @@ A package should be loadable in two ways: linked into the executable when it
 is built, or loaded from a shared library at run time by a DSL command.  In
 both cases the package exposes one registration function that receives a
 handle to the registry and uses it to define types, messages, handlers and new
-DSL commands.  A package may also register initialisation and finalisation
+DSL commands.  For a package whose definitions are written as a definition
+script (Section~\ref{sec:scripts}), the registration function supplies that
+script, embedded in the library, and registers the kernels it names; the
+core then checks each kernel's declared columns against the schema.  A package may also register initialisation and finalisation
 hooks, which the core calls in a defined order relative to MPI and to other
 packages; Section~\ref{sec:kokkos-needs} explains why these are needed.
 Supporting static linking matters on machines where dynamic loading is
@@ -1662,6 +1913,15 @@ ownership, versions) and the mesh package understands \emph{meaning}
         Section~\ref{sec:dsl} lists three answers; choosing among them needs
         experiment, and translating expressions to kernels reopens the GPU
         compilation question.
+  \item \textbf{Two storage classes.}  Section~\ref{sec:records} separates
+        records from bulk tables.  The boundary is clear for a solver and
+        for a particle, and less clear in between: a problem with thousands
+        of material regions or boundary patches has many records, each
+        feeding a generated look-up table.  Whether generation and
+        regeneration stay cheap there, and whether package developers find
+        the test of Section~\ref{sec:records} easy to apply, is untested.
+        So is the practice of keeping a definition script, a generated
+        header and a compiled plugin in step (Section~\ref{sec:scripts}).
   \item \label{risk:mesh} \textbf{Meshes.}  Section~\ref{sec:mesh} argues
         that tables with declared relations can represent every mesh family,
         but several points rest on argument and not measurement: whether
@@ -1714,8 +1974,10 @@ through every milestone from M1.
         serial and OpenMP back ends in a prebuilt container image; the
         local script for tier~3.
   \item[M1. Schema and store, host only.]
-        Run-time type registry; tables with aligned columns; creation and
-        deletion of rows; Arrow C data interface export and import.
+        Run-time type registry with namespaces and both storage classes;
+        tables with aligned columns; records and table attributes; a look-up
+        table generated from records; creation and deletion of rows; Arrow C
+        data interface export and import.
         Relation columns of fixed and variable arity with declared targets;
         index spaces; transpose and compose; renumbering and compaction
         through relations.
@@ -1736,7 +1998,10 @@ through every milestone from M1.
         where per-table dispatch stops being free (risk~\ref{risk:dispatch}).
   \item[M3. Lua front end.]
         Embed Lua~5.5 through \code{mlua}; expose type definition, handler
-        binding and commands; run a script end to end.
+        binding and commands; run a script end to end.  Definition and driver
+        roles as separate environments (Section~\ref{sec:scripts}); the
+        ownership rules, including a driver adding a field to a package's
+        type; the check and describe invocations.
         \emph{Measure:} time spent in Lua per time step for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
@@ -1745,7 +2010,10 @@ through every milestone from M1.
         and OpenMP back ends), and register all four.  The Kokkos kernel
         requires the first version of the adapter: life-cycle hooks,
         unmanaged views over columns with explicit layout, exception
-        wrapping, and the CMake package configuration.
+        wrapping, and the CMake package configuration.  The package's
+        definitions come from a definition script embedded in the plugin; a
+        typed header is generated from it; a kernel whose declared columns
+        do not match the schema is refused at load.
         \emph{Measure:} that the four perform identically when compared like
         with like (single-threaded against Kokkos serial, threaded against
         Kokkos OpenMP), which confirms that the interface adds no cost.
@@ -1979,7 +2247,9 @@ Question & Recommendation \\
 Core language & Rust, on the stable compiler \\
 Interface language & C ABI, header generated from the Rust source \\
 User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined to the control plane \\
+Scripts & Definition scripts owned by packages and driver scripts owned by users, separated by role and privilege, not by modes; the definition script is the single source of truth and can be evaluated offline; bindings checked at load; ownership by namespace, with fields added but never altered by others \\
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
+Configuration objects & Records: same schema as bulk types, stored on the host and replicated on every rank; fixed-width fields reach kernels by value or through generated look-up tables; tables carry a record of attributes \\
 Dispatch & Dynamic per table through a (message, type, device) table; static within kernels \\
 GPU strategy & The infrastructure owns memory and scheduling; kernels are opaque and may come from any toolchain \\
 Meshes & Tables plus declared relations (fixed and offsets-and-indices), index spaces across element types, table versions and transfer maps for adaptation, one ghost-to-owner communication primitive; mesh semantics in a separate protocol, not in the core \\
