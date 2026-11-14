@@ -472,6 +472,7 @@ and run again.
 \end{enumerate}
 
 \subsection{What the DSL might look like}
+\label{sec:sketch}
 
 The two sketches below are illustrative only.  Between them they show what
 the DSL has to express: type definitions, parameters, message bindings and
@@ -524,6 +525,38 @@ end)
 cam.run{ until_time = 1.0e-6, dt = 1.0e-9 }
 \end{lstlisting}
 
+The names in the sketches are placeholders, invented for a small example
+drawn from particle simulation.  Table~\ref{tab:placeholders} says what each
+stands for.  The functions of the \code{cam} module that the sketches call
+(\code{cam.type}, \code{cam.record}, \code{answers}, \code{cam.use},
+\code{extend}, \code{table}, \code{create}, \code{cam.on}, \code{cam.write},
+\code{cam.run} and the rest) are placeholders in the same sense.  They stand
+for capabilities this report proposes, not for an interface that has been
+designed.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{34mm} L@{}}
+\toprule
+Name & What it stands for \\
+\midrule
+\code{pusher} & The example package, and the namespace that owns its definitions.  A \enquote{particle pusher} is the part of a particle simulation that advances each particle's position and velocity over a time step \\
+\code{boris} & The compiled kernel, in the package's library, that answers \code{pusher.advance}.  It is named after the Boris algorithm, the usual pusher for charged particles in electric and magnetic fields~\cite{boris} \\
+\code{pusher.Particle} & A bulk type.  Each particle is a row, and \code{position} and \code{velocity} are its fields \\
+\code{pusher.Species} & A record type holding what all particles of one kind share: a name, a charge and a mass.  The driver supplies the values for the electron, in SI units \\
+\code{pusher.cfl} & An example of a package parameter.  It is named after the Courant--Friedrichs--Lewy number, a dimensionless limit on the size of a time step \\
+\code{pusher.advance} & A message asking a table of particles to advance by one time step \\
+\code{tracer} & A field added by the user, not by the package: a label, say, for following chosen particles through the output \\
+\code{electrons} & A table of particles, with a name chosen by the user \\
+\code{step\_end} & An event that the core is assumed to emit at the end of every time step \\
+\code{schema.lua}, \code{run.lua} & File names, which are arbitrary \\
+\bottomrule
+\end{tabularx}
+\caption{Placeholder names used in the sketches.}
+\label{tab:placeholders}
+\end{table}
+
 %------------------------------------------------------------------------------
 \section{The schema and the store}
 \label{sec:schema}
@@ -556,7 +589,8 @@ are fixed here.
 
 \begin{description}[style=nextline,leftmargin=2em]
   \item[Type.]
-        A named list of fields, such as \code{pusher.Particle}.  It is a
+        A named list of fields, such as \code{pusher.Particle} in the
+        example of Section~\ref{sec:sketch}.  It is a
         description held in the registry and nothing more: it contains no
         data and no behaviour.  The nearest familiar things are a
         \code{struct} declaration and the definition of a database table.
@@ -1098,8 +1132,8 @@ The package keeps access to the libraries built on Kokkos, and it gives up
 little: templates cannot cross the C boundary, so nothing from \camshaft{} is
 inlined into a kernel, which per-table dispatch never required.
 
-The sketch below shows the shape of a handler.  All \camshaft{} names are
-invented for illustration.
+The sketch below shows the shape of a handler.  All \camshaft{} names in it
+are invented for illustration, and are explained after it.
 
 \begin{lstlisting}[language=C++]
 #include <Kokkos_Core.hpp>
@@ -1120,6 +1154,18 @@ extern "C" cam_status advance(cam_batch* batch, void* /*ctx*/) try {
   return CAM_ERROR_PACKAGE;   // exceptions must not cross the C boundary
 }
 \end{lstlisting}
+
+\code{advance} is the handler a package would register for a message such as
+\code{pusher.advance} in the example of Section~\ref{sec:sketch}.  To keep
+the sketch short, its body moves each particle by its velocity and applies
+no force; it is not the Boris algorithm.  \code{cam\_batch} stands for what
+a handler is given: a range of rows of one table, together with the columns
+the handler declared.  \code{cam::view} is the adapter function that wraps
+a column as an unmanaged view, and \code{cam\_batch\_dt} reads the time step
+from the event's payload.  \code{cam\_status}, \code{CAM\_OK} and
+\code{CAM\_ERROR\_PACKAGE} are the return codes of Section~\ref{sec:api}.
+\code{camshaft.h} is the generated C header and \code{camshaft\_kokkos.hpp}
+is the adapter's header.
 
 \subsection{What the infrastructure must provide}
 \label{sec:kokkos-needs}
