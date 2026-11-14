@@ -84,6 +84,9 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+User documentation is written in the definition scripts, held in the registry
+and rendered by the project's own tools, while developer documentation is
+built from the code by each language's own tool (Section~\ref{sec:docs}).
 Section~\ref{sec:roadmap} turns these conclusions into a prototype plan whose
 early milestones are experiments designed to confirm or overturn them.
 \end{abstract}
@@ -440,9 +443,10 @@ and run again.
   \item \textbf{Definition scripts can be evaluated offline.}  They need no
         MPI, no device and no simulation, and their only effect is to fill
         the registry.  This is what makes tools possible: generating a typed
-        header for C++ or Fortran from a package's definitions, printing
-        documentation for its types and parameters, and validating a driver
-        script without running it.
+        header for C++ or Fortran from a package's definitions, building
+        the user documentation for its types and parameters
+        (Section~\ref{sec:docs}), and validating a driver script without
+        running it.
   \item \textbf{Bindings are checked once, when the package is loaded.}  A
         compiled kernel declares the columns it reads and writes, with their
         types (Section~\ref{sec:device-memory}).  When the handler is bound,
@@ -661,6 +665,8 @@ package through the API.  For each type the registry should record:
         checkpoints and separately compiled plugins agree on it;
   \item for each field, its name, element type, shape (scalar, fixed-size
         vector or tensor) and physical unit, if any;
+  \item for the type and for each field, the documentation text its author
+        supplied (Section~\ref{sec:docs});
   \item for each field, placement and life-cycle metadata: whether it lives
         on the host, on a device, or both; whether it is checkpointed; whether
         it is exchanged between MPI ranks;
@@ -1550,6 +1556,7 @@ camshaft/
     fortran/            CMake; interface module source
     python/  julia/     packages in their own ecosystems
   examples/             one small package per language
+  docs/                 portal and narrative documentation (mdBook)
   research/             this report
 \end{lstlisting}
 
@@ -2015,8 +2022,9 @@ through every milestone from M1.
         executable; an installation step that produces the libraries, header,
         pkg-config and CMake files; and a CMake project for the Kokkos
         adapter and a C++ demonstration package that builds against the
-        installed library.  Tier~1 of the continuous integration described in
-        Section~\ref{sec:ci}, on stable Rust, with Kokkos built for its
+        installed library.  The documentation portal and the rustdoc build of
+        Section~\ref{sec:docs}, with their lints.  Tier~1 of the continuous
+        integration described in Section~\ref{sec:ci}, on stable Rust, with Kokkos built for its
         serial and OpenMP back ends in a prebuilt container image; the
         local script for tier~3.
   \item[M1. Schema and store, host only.]
@@ -2047,7 +2055,10 @@ through every milestone from M1.
         binding and commands; run a script end to end.  Definition and driver
         roles as separate environments (Section~\ref{sec:scripts}); the
         ownership rules, including a driver adding a field to a package's
-        type; the check and describe invocations.
+        type; the check and describe invocations.  Documentation
+        arguments on definitions; the machine-readable description; the
+        reference pages and the editor definition file rendered from it
+        (Section~\ref{sec:docs}).
         \emph{Measure:} time spent in Lua per time step for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
@@ -2059,7 +2070,9 @@ through every milestone from M1.
         wrapping, and the CMake package configuration.  The package's
         definitions come from a definition script embedded in the plugin; a
         typed header is generated from it; a kernel whose declared columns
-        do not match the schema is refused at load.
+        do not match the schema is refused at load.  The generated header
+        carries the documentation comments of the Rust source, and the
+        reference for the C interface and the adapter is built from it.
         \emph{Measure:} that the four perform identically when compared like
         with like (single-threaded against Kokkos serial, threaded against
         Kokkos OpenMP), which confirms that the interface adds no cost.
@@ -2210,7 +2223,7 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; this report builds \\
+1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
 2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; sanitizers across the language boundary; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
 3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
 4 & A cluster; per campaign & Vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
@@ -2282,6 +2295,164 @@ specific to a back end is then Kokkos's and not this project's, but M5's
 \enquote{at least two Kokkos GPU back ends} depends on cluster access.
 
 %------------------------------------------------------------------------------
+\section{Documentation}
+\label{sec:docs}
+
+There are two kinds of documentation, and they should be produced by two
+separate pipelines.  \emph{User documentation} tells someone writing a
+driver script what a package offers.  It is written by the package's
+developers in their definition scripts and built by \camshaft{}'s own tools.
+\emph{Developer documentation} describes programming interfaces.  It is
+built from the code, by the tool that belongs to each language.
+
+\subsection{User documentation from definition scripts}
+
+\paragraph{Documentation is data.}  Everything a definition script defines
+(a type, a field, a record, a parameter, a message, a command) accepts a
+\code{doc} argument, and the registry stores it with the definition
+(Section~\ref{sec:schema-record}).
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.param("pusher.cfl", cam.f64, {
+  default = 0.5,
+  doc = "Time-step limit as a fraction of the stability bound.",
+})
+\end{lstlisting}
+
+It is an argument and not a comment for three reasons.  The interpreter
+discards comments, so a separate parser would be needed to recover them.
+An argument is available while the program runs, to an interactive help
+command and to an error message.  And an argument is attached to a
+definition, so it cannot describe something that does not exist.  Three
+things follow.
+
+\begin{itemize}
+  \item \emph{The developer writes only prose.}  A field's type, shape, unit
+        and default, the messages a type answers and the columns a kernel
+        reads and writes are already in the schema, and are generated.
+  \item \emph{Missing documentation can be detected.}  The check invocation
+        of Section~\ref{sec:scripts} can report, or refuse, a package whose
+        public fields, parameters or messages have no \code{doc}.
+  \item \emph{The core documents itself in the same way.}  Its own commands
+        and events are entered in the registry with their documentation,
+        as a package's are.
+\end{itemize}
+
+MOOSE is the precedent.  Its developers write a description for each object
+and each parameter in the code where the parameter is declared, and its
+documentation system generates the parameter tables from the
+application~\cite{moosedocs}.
+
+\paragraph{Building.}  The describe invocation emits a machine-readable
+description of a package, in JSON, with a version number of its own.  That
+description is the contract, and everything else is rendered from it:
+
+\begin{itemize}
+  \item help in the terminal, and error messages that quote the
+        documentation of the parameter that was set wrongly;
+  \item a static reference in HTML;
+  \item a definition file for the Lua language server, from which an editor
+        offers completion and descriptions while a user writes a driver
+        script~\cite{luals}.
+\end{itemize}
+
+Because definition scripts can be evaluated offline
+(Section~\ref{sec:scripts}), none of this needs MPI or a device, and all of
+it can run in tier~1 of Section~\ref{sec:ci}.
+
+\paragraph{Shipping.}  There are three channels, in order of importance.
+
+\begin{enumerate}
+  \item \textbf{Inside the plugin.}  The definition script is embedded in
+        the plugin, so the documentation is too.  Describing a package works
+        on a cluster with no access to the internet, and what it prints
+        always matches the version that is installed.
+  \item \textbf{Installed files.}  A package's installation step places the
+        generated reference in its documentation directory, and Spack
+        carries it from there.
+  \item \textbf{A hosted site for each package}, published from continuous
+        integration at each release and marked with the package version and
+        the schema version.
+\end{enumerate}
+
+Since the reference comes from the registry, \camshaft{} can also build one
+combined reference for exactly the packages, at exactly the versions, that a
+user has installed.
+
+\paragraph{Narrative stays out of scripts.}  Reference text belongs in the
+definition script.  Tutorials, theory and equations do not; they are
+Markdown files in the package's documentation directory.  Those files refer
+to registry names such as \code{pusher.Particle}, and the build checks that
+every such reference resolves.  Example driver scripts shown in the
+documentation are run through the check invocation in continuous
+integration, so that they cannot fall out of date unnoticed.
+
+\subsection{Developer documentation from code}
+
+Developer documentation has two audiences.  Package developers read the C
+interface, the Kokkos adapter, the Fortran module, the Rust interface and
+the definition functions; that documentation is published.  Contributors to
+the core read its internals; that documentation is built on request.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{36mm} >{\raggedright\arraybackslash}p{34mm} L@{}}
+\toprule
+Code & Tool & Notes \\
+\midrule
+Rust core and Rust interface & rustdoc~\cite{rustdoc} & Undocumented public items and unresolved links are lints, treated as errors in continuous integration; examples in the documentation are compiled and run as tests \\
+C interface & Doxygen~\cite{doxygen} on the generated header & cbindgen copies the documentation comments of the Rust source into the header~\cite{cbindgen}, so they are written once, in Rust \\
+Kokkos adapter & Doxygen & \\
+Fortran module & FORD~\cite{ford} & \\
+Python and Julia bindings & Sphinx~\cite{sphinx}; Documenter.jl~\cite{documenter} & Each ecosystem's own tool \\
+\bottomrule
+\end{tabularx}
+\caption{Developer documentation, by language.}
+\label{tab:devdocs}
+\end{table}
+
+These should not be forced through one generator.  Developers expect the
+output of their own language's tool, and a small portal site that links the
+separate references is enough to hold them together.
+
+\subsection{Site generator}
+
+The user reference, the narrative documentation and the portal need a
+generator of static sites.  The default is mdBook~\cite{mdbook}.  It is a
+single program from the Rust project, so it adds nothing to what the core
+already requires; it takes Markdown; and it renders equations through
+MathJax.  Sphinx~\cite{sphinx} is the alternative held in reserve.  It is
+what the documentation of Kokkos, AMReX and LAMMPS is built with, so it is
+familiar in this field, and it has richer cross-referencing and many
+extensions.  Its cost is a Python dependency in the documentation build of
+every package.
+
+The choice is reversible by construction.  The machine-readable description
+is the contract, and the narrative is plain Markdown, which Sphinx reads
+through its MyST parser~\cite{myst}.  Changing generator means replacing a
+renderer, not rewriting documentation.  The change should be made if mdBook
+proves inadequate for equation-heavy theory manuals, for references across
+packages, or for publishing several versions side by side.
+
+This report remains the design record and belongs to neither pipeline.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item Every definition accepts documentation text, the registry stores it,
+        and the C interface exposes it.
+  \item The describe invocation emits a versioned, machine-readable
+        description of a package.
+  \item The project supplies two renderers of that description: the
+        reference pages and the editor definition file.
+  \item A package's installation includes its generated reference.
+  \item Tier~1 of continuous integration builds all the documentation, with
+        its lints, and runs the documented examples through the check
+        invocation.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
 \section{Summary of recommendations}
 
 \begin{center}
@@ -2305,6 +2476,7 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
 Testing & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
 Build system & Cargo for the core, with an explicit installation step; CMake for C++ and Fortran bindings and packages against the installed library; Spack for distribution \\
