@@ -84,6 +84,10 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+Errors are to be caught at the earliest stage that can detect them: by the
+compilers, by offline checks of definition and driver scripts, when a package
+is loaded, and before the first cycle of a run, in preference to during it
+(Section~\ref{sec:validation}).
 User documentation is written in the definition scripts, held in the registry
 and rendered by the project's own tools, while developer documentation is
 built from the code by each language's own tool (Section~\ref{sec:docs}).
@@ -98,7 +102,7 @@ early milestones are experiments designed to confirm or overturn them.
 \section{Scope and requirements}
 \label{sec:requirements}
 
-The project brief can be reduced to eight requirements.  They are numbered
+The project brief can be reduced to nine requirements.  They are numbered
 here so that later sections can refer to them.
 
 \begin{enumerate}[label=\textbf{R\arabic*},leftmargin=3em]
@@ -121,6 +125,11 @@ here so that later sections can refer to them.
         be written in a language other than the infrastructure's.  The
         working assumption is that most will be written in C++ with Kokkos.
         C++ is to be avoided in the infrastructure itself.
+  \item \label{req:early} \textbf{Errors are caught as early as possible.}
+        A mistake in a package or in an input should be found when the code
+        is compiled or when the input is checked, not while a simulation is
+        running.  A failed run costs a wait in a queue and the hours of an
+        allocation; a check costs seconds.
 \end{enumerate}
 
 Two of these pull against the rest.  \ref{req:perf} and \ref{req:port} favour
@@ -128,6 +137,15 @@ static, ahead-of-time, monomorphic code; \ref{req:interp}, \ref{req:dsl},
 \ref{req:schema} and \ref{req:lang} favour run-time flexibility.  Most of the
 design questions in this report are questions about where to put the boundary
 between the two.
+
+\ref{req:early} bears on the same boundary from the other side.  A schema
+that is defined at run time takes checks away from the compiler.  The design
+answers by putting stages between compilation and the run (an offline check
+of definitions, the loading of a package, a check of the driver, a
+pre-flight before the first cycle) and by making every check at the earliest
+stage at which the information it needs exists.  Section~\ref{sec:validation}
+sets this out, and earlier sections refer to it where a choice was made for
+this reason.
 
 \paragraph{A note on the name.}  A camshaft turns one driving rotation into
 the precisely timed actuation of many independent parts.  The infrastructure
@@ -145,7 +163,7 @@ papers and documentation.
 \section{Prior art}
 \label{sec:prior}
 
-No existing framework meets all eight requirements, but each requirement has
+No existing framework meets all nine requirements, but each requirement has
 been met somewhere.  Table~\ref{tab:prior} summarises the systems that were
 examined, and the paragraphs below draw out what \camshaft{} should take from
 them.
@@ -259,7 +277,9 @@ of layout and calling convention, and tools such as \code{cbindgen} generate
 the C header from the Rust source~\cite{cbindgen}.  Finally, Rust's aliasing
 rules give the optimiser the \enquote{no two mutable references overlap}
 guarantee that Fortran compilers have always exploited and C compilers must be
-told about with \code{restrict}.
+told about with \code{restrict}.  Rust also serves \ref{req:early} directly:
+memory errors and data races in the core are rejected by the compiler and
+never reach a run.
 
 Interest in Rust for software of this kind is growing in the
 high-performance computing community.  Lamellar, a distributed tasking
@@ -337,7 +357,7 @@ front end, without touching the core.
 \toprule
 Language & For & Against \\
 \midrule
-Lua 5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library \\
+Lua 5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library; permissive by default, so that a misspelt name yields \code{nil} and not an error (Section~\ref{sec:strict} closes this) \\
 LuaJIT & Much faster than the reference interpreter; excellent foreign function interface & Frozen at Lua~5.1 semantics; no tagged releases; narrower platform coverage \\
 Luau & Gradual types; sandboxing; actively developed & A dialect; implemented in C++ \\
 Python & Familiar to nearly every scientist & Heavy; start-up and import cost; embedding fixes the interpreter version for every package \\
@@ -429,7 +449,9 @@ are read.  Creating objects is therefore an ordinary command in the event
 stream.  There is no \enquote{generation} stage, and a driver may run, create
 and run again.
 
-\paragraph{Rules.}  Five rules follow.
+\paragraph{Rules.}  Five rules follow.  Rules 2, 3 and 5 exist to serve
+\ref{req:early}: they move checks out of the run and into the build, the
+loading of a package and a check made before the run.
 
 \begin{enumerate}
   \item \textbf{The definition script is the single source of truth, and it
@@ -673,7 +695,10 @@ package through the API.  For each type the registry should record:
   \item a stable identifier, derived from the qualified name, so that
         checkpoints and separately compiled plugins agree on it;
   \item for each field, its name, element type, shape (scalar, fixed-size
-        vector or tensor) and physical unit, if any;
+        vector or tensor), and physical dimension and unit, if any;
+  \item for each field, its constraints: whether it is required, its
+        default, its permitted range or values, and whether it is deprecated
+        (Section~\ref{sec:validation});
   \item for the type and for each field, the documentation text its author
         supplied (Section~\ref{sec:docs});
   \item for each field, placement and life-cycle metadata: whether it lives
@@ -887,7 +912,9 @@ events.
 \end{enumerate}
 
 The adaptation sequence of Section~\ref{sec:mesh-change} runs between
-cycles.
+cycles.  Before the first cycle of a run the core makes the pre-flight
+checks of Section~\ref{sec:preflight}, so that what can be known to be wrong
+is reported then and not at the cycle where it would first be used.
 
 \paragraph{Stopping.}  \code{run} takes several stop conditions, stops at
 the first one that is met, and returns which it was, so that the driver can
@@ -1124,6 +1151,8 @@ following properties.
         error code with a retrievable message.
   \item \textbf{Explicit versioning.}  A plugin states the interface version
         it was built against, and the core refuses versions it cannot serve.
+        It does so when the plugin is loaded, before anything runs
+        (\ref{req:early}).
 \end{itemize}
 
 The interface should be written in Rust as \code{extern "C"} functions, with
@@ -2046,6 +2075,250 @@ ownership, versions) and the mesh package understands \emph{meaning}
 (topology, geometry, quality, refinement criteria).
 
 %------------------------------------------------------------------------------
+\section{Validation}
+\label{sec:validation}
+
+\ref{req:early} asks that errors be caught as early as possible.  The
+reason is an asymmetry of cost.  A simulation that fails at its hundredth
+cycle has already waited in a queue and spent part of an allocation, and
+its author learns of one mistake at a time.  A check made on a login node
+costs seconds and can report every mistake it finds.  The design should
+therefore spend effort freely on checks made before a run, and should treat
+any error first reported during a run as one that an earlier stage ought to
+have caught, wherever that was possible.  The rule is this.
+
+\begin{quote}
+\emph{Every check is made at the earliest stage at which the information it
+needs exists.  Nothing is left to the run that could have been caught
+before it.}
+\end{quote}
+
+\subsection{Stages}
+
+Table~\ref{tab:stages} lists the stages in order and what each can check.
+Several of the checks were introduced in earlier sections for other
+reasons: bindings checked when a package is loaded
+(Section~\ref{sec:scripts}), the interface version
+(Section~\ref{sec:api}), duplicated runtimes (Section~\ref{sec:build}),
+ownership of types (Section~\ref{sec:scripts}), and the range-checking of
+relations and the detection of stale versions (Section~\ref{sec:mesh}).
+They are gathered here because they are one policy.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{30mm} L >{\raggedright\arraybackslash}p{30mm}@{}}
+\toprule
+Stage & What is checked & What it needs \\
+\midrule
+Compilation & In the core, memory errors and data races, by the Rust compiler.  In packages, the names and types of fields, through the header generated from the definitions (Section~\ref{sec:scripts}) & Compilers only \\
+Definition check & Names; namespaces and ownership; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
+Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
+Loading a package & Each kernel's declared columns, with their types and units, against the schema; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
+Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; every Lua handler, by calling it once & A login node, for seconds \\
+Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built & The real run, before its first cycle \\
+During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
+\bottomrule
+\end{tabularx}
+\caption{Stages of checking, earliest first.}
+\label{tab:stages}
+\end{table}
+
+The schema compatibility check does for definitions what the comparison of
+binary interfaces in Section~\ref{sec:ci} does for the C interface: it
+compares the machine-readable description of a package
+(Section~\ref{sec:docs}) with that of its last release.
+
+\subsection{Constraints are data}
+
+Constraints are treated as documentation is: as data in the registry, read
+by one piece of code.
+
+\begin{itemize}
+  \item \emph{Constraints are metadata on fields.}  A field already has a
+        type, a unit, a default and its documentation.  It may also be
+        required, have a permitted range or a set of permitted values, and
+        be marked as deprecated (Section~\ref{sec:schema-record}).
+  \item \emph{The arguments of a command are a record.}  A command such as
+        \code{run} declares a record type for its arguments
+        (Section~\ref{sec:records}), so validating a command is validating
+        a record against its type, and a package that adds a command gets
+        the validation with it.
+  \item \emph{There is one validator, and it is in the core.}  It stands
+        behind the C interface, so a Python or Julia host and a C++ package
+        are checked exactly as a Lua script is.
+  \item \emph{Rules that span fields need a function.}  \enquote{Exactly
+        one of these two must be given} cannot be stated field by field.  A
+        type may register a validation function, in the definition script
+        or compiled, which is called once for each record and never once
+        for each row.
+  \item \emph{References are checked through declared relations.}  A
+        boundary condition that names a missing boundary, or a cell that
+        refers to a missing material, is found by the same mechanism that
+        range-checks any relation (Section~\ref{sec:relations}).
+\end{itemize}
+
+Because constraints are data, the generated documentation shows them, and
+the description of a parameter that a user reads is the rule by which their
+input is judged.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.param("pusher.cfl", cam.f64, {
+  default = 0.5,
+  min = 0.0, max = 1.0, exclusive_min = true,
+  doc = "Time-step limit as a fraction of the stability bound.",
+})
+\end{lstlisting}
+
+\subsection{Units}
+
+A definition script declares the physical dimension and the unit of each
+field that has one.  A package may also declare a system of units once, and
+a field that states only its dimension then takes its unit from that
+system.  Three rules govern what a driver may write.
+
+\begin{enumerate}
+  \item \textbf{A bare number is in the field's declared unit.}  Driver
+        scripts are not required to attach units to quantities.
+  \item \textbf{An explicit quantity is converted.}  A value given with a
+        unit of the right dimension is converted to the field's unit when
+        it enters the record.
+  \item \textbf{A dimension mismatch is rejected,} at the user's line.
+\end{enumerate}
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- pusher.Species declares mass as a mass, in kilograms.
+{ name = "electron", mass = 9.109e-31 }                     -- kilograms
+{ name = "electron", mass = cam.quantity(9.109e-28, "g") }  -- converted
+{ name = "electron", mass = cam.quantity(1.0, "m") }        -- rejected
+\end{lstlisting}
+
+Conversion happens in the control plane, where a value enters a record.
+Columns are stored in their declared units and nothing is converted inside
+a kernel.  Between packages the same principle is applied one stage
+earlier: a kernel's declaration of a column may state the unit it expects,
+the binding check compares it with the column's unit when the package is
+loaded, and a mismatch is an error then.  Output files and checkpoints
+record the units of what they hold.
+
+\subsection{Strict script environments}
+\label{sec:strict}
+
+Lua is permissive in ways that hide mistakes until late.  The environments
+in which definition and driver scripts run (Section~\ref{sec:scripts}) must
+close each of them.
+
+\begin{itemize}
+  \item \emph{Unknown arguments are rejected.}  Lua accepts any key in a
+        table, so a misspelt argument would be ignored in silence and its
+        default used.  Every command rejects a key it does not declare.
+        This is the most valuable single check.
+  \item \emph{Undefined names are errors.}  Reading a global variable that
+        was never set, or a member that a package or a type does not have,
+        yields \code{nil} in Lua and a confusing failure somewhere later.
+        In these environments both are errors where they occur, and
+        assigning to an undeclared global is an error too.
+  \item \emph{Numbers are converted strictly.}  A value such as \code{1e6}
+        is accepted where an integer is expected, because it is one.  A
+        value with a fractional part is not, and neither is one that does
+        not fit.
+  \item \emph{Errors point at the user's line.}  A report names the file and
+        line of the call in the user's script, the command and the argument,
+        what was expected and what was given, the nearest valid name, and
+        the argument's own documentation.
+\end{itemize}
+
+\begin{lstlisting}
+run.lua:14: cam.run: unknown argument 'untill_time'
+  did you mean 'until_time'?  Absolute limit on simulation time.
+\end{lstlisting}
+
+The same environments protect the assumption of Section~\ref{sec:dispatch}
+that every rank processes the same sequence of events.  A script is read on
+one rank and sent to the others, so all of them run the same text.  Library
+functions whose results could differ between ranks (the time of day,
+unseeded random numbers, reading files) are removed or replaced by versions
+that give every rank the same answer.  And during a run the ranks compare a
+hash of the events they have processed at intervals, so that a divergence
+is reported when it happens and not when its consequences appear.
+
+\subsection{The driver check}
+
+A driver is a program, so it cannot be validated by inspection.  The check
+invocation \emph{runs} it, against a \emph{shadow state}.
+
+\begin{itemize}
+  \item Records are created in full, since they are small, and are
+        validated completely.
+  \item Tables exist, with their row counts, but no columns are allocated.
+        From the row counts the check estimates the memory the run will need
+        on each rank and each device.
+  \item \code{run} returns at once.
+  \item \emph{Every registered handler is called once,} with a synthetic
+        event built from the declared payload of its message, and with the
+        commands it issues bound to the shadow state.  A mistake inside a
+        handler for \code{cycle\_end} would otherwise be found at the first
+        cycle on which the handler acts, which may be hours into a job that
+        waited days to start.  The cost of calling each handler once is
+        negligible beside that.
+  \item Errors are collected, not raised.  A command that fails leaves a
+        placeholder in the shadow state, so that later references to its
+        result do not each produce an error of their own, and the check
+        reports everything it found.
+\end{itemize}
+
+The check does not use a second validator.  It runs the commands that a
+real run would run, with execution replaced, so nothing can pass the check
+and then fail the same test in the run.  LAMMPS offers a narrower facility
+of the same kind, a command-line switch that processes an entire input
+script without executing its run commands~\cite{lammpsskiprun}.
+
+\subsection{Pre-flight}
+\label{sec:preflight}
+
+Some things cannot be known until the real run has loaded its data: which
+tables exist on which devices, how the mesh is partitioned.  Before the
+first cycle of every \code{run} the core checks everything that those
+facts settle (Table~\ref{tab:stages}).  A handler that has no kernel for
+the device its table is on is then reported before cycle~0, and not at the
+cycle on which its message is first sent.
+
+\subsection{What cannot be checked early}
+
+\begin{itemize}
+  \item \emph{Paths not taken.}  The driver check covers the path the driver
+        executes on the shadow state.  A branch that depends on the outcome
+        of a run is not explored.
+  \item \emph{Synthetic events are not real ones.}  A handler whose
+        behaviour depends on the state of the simulation may take a
+        different path in a real run from the one it took in the check.
+  \item \emph{Bulk data.}  Columns cannot be validated in Lua.  Constraints
+        declared on the fields of bulk types (finite, positive, within a
+        range) are checked by generic kernels, on request, because each
+        check costs a pass over the data.
+  \item \emph{The physics.}  A simulation that becomes unstable is not an
+        error of input.  The stop conditions of Section~\ref{sec:cycles} and
+        checkpoints limit what it costs.
+\end{itemize}
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item Fields carry constraints, dimensions and units in the registry, and
+        commands declare their arguments as record types.
+  \item One validator in the core serves every front end and every stage.
+  \item Script environments are strict: unknown arguments, undefined names
+        and inexact numbers are errors, reported at the user's line.
+  \item The check invocation runs a driver on a shadow state, calls every
+        handler once, collects all errors and estimates memory.
+  \item A schema compatibility check compares a package's description with
+        that of its last release.
+  \item \code{run} makes pre-flight checks before its first cycle.
+  \item A kernel may declare the unit it expects of a column, and the
+        binding check compares units as well as types.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
 \section{Risks and open questions}
 \label{sec:risks}
 
@@ -2087,6 +2360,14 @@ ownership, versions) and the mesh package understands \emph{meaning}
         the test of Section~\ref{sec:records} easy to apply, is untested.
         So is the practice of keeping a definition script, a generated
         header and a compiled plugin in step (Section~\ref{sec:scripts}).
+  \item \textbf{Limits of checking before the run.}
+        Section~\ref{sec:validation} promises a great deal of a check that
+        takes seconds.  A driver is a program, so the check covers the path
+        it executes and not every path.  A handler called with a synthetic
+        event may behave differently from one called in a real run.  And the
+        treatment of units is only outlined: derived units, and the
+        normalised or dimensionless systems that many physics codes use,
+        need a design of their own.
   \item \label{risk:mesh} \textbf{Meshes.}  Section~\ref{sec:mesh} argues
         that tables with declared relations can represent every mesh family,
         but several points rest on argument and not measurement: whether
@@ -2141,6 +2422,8 @@ through every milestone from M1.
         local script for tier~3.
   \item[M1. Schema and store, host only.]
         Run-time type registry with namespaces and both storage classes;
+        field constraints, dimensions and units, and the one validator that
+        reads them (Section~\ref{sec:validation});
         tables with aligned columns; records and table attributes; a look-up
         table generated from records; creation and deletion of rows; Arrow C
         data interface export and import.
@@ -2157,7 +2440,8 @@ through every milestone from M1.
         Event queue; message and handler registration; per-table dispatch
         with cached call lists.  The run loop of Section~\ref{sec:cycles}:
         the cycle counter, the clock, messages with combined results, the
-        time-step proposal, and stop conditions, absolute and relative.  Table version counters and invalidation of
+        time-step proposal, and stop conditions, absolute and relative.
+        The pre-flight checks before the first cycle.  Table version counters and invalidation of
         cached lists.  The adaptation sequence of
         Section~\ref{sec:mesh-change} on the block-based mesh, with transfer
         maps and per-field transfer rules; dispatch of one message to the
@@ -2172,7 +2456,10 @@ through every milestone from M1.
         type; the check and describe invocations.  Documentation
         arguments on definitions; the machine-readable description; the
         reference pages and the editor definition file rendered from it
-        (Section~\ref{sec:docs}).
+        (Section~\ref{sec:docs}).  Strict environments and error reports
+        that point at the user's line; the driver check with its shadow
+        state, in which every registered handler is called once; quantities
+        with units (Section~\ref{sec:validation}).
         \emph{Measure:} time spent in Lua per cycle for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
@@ -2187,6 +2474,10 @@ through every milestone from M1.
         do not match the schema is refused at load.  The generated header
         carries the documentation comments of the Rust source, and the
         reference for the C interface and the adapter is built from it.
+        A package kernel that names a field wrongly fails to compile against
+        the generated header; a kernel that expects another unit is refused
+        at load; a definition changed without a new schema version fails the
+        compatibility check.
         \emph{Measure:} that the four perform identically when compared like
         with like (single-threaded against Kokkos serial, threaded against
         Kokkos OpenMP), which confirms that the interface adds no cost.
@@ -2337,7 +2628,7 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
+1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
 2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; sanitizers across the language boundary; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
 3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
 4 & A cluster; per campaign & Vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
@@ -2445,8 +2736,11 @@ things follow.
         and default, the messages a type answers and the columns a kernel
         reads and writes are already in the schema, and are generated.
   \item \emph{Missing documentation can be detected.}  The check invocation
-        of Section~\ref{sec:scripts} can report, or refuse, a package whose
-        public fields, parameters or messages have no \code{doc}.
+        of Section~\ref{sec:scripts} reports a package whose public fields,
+        parameters or messages have no \code{doc}.  By default that is a
+        warning.  Whether it is an error is for the package's developers and
+        maintainers to decide, and they set it in their own continuous
+        integration.
   \item \emph{The core documents itself in the same way.}  Its own commands
         and events are entered in the registry with their documentation,
         as a package's are.
@@ -2591,6 +2885,7 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
 Testing & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
