@@ -422,6 +422,19 @@ bypass the interface, such as a write through a stray pointer, is found in
 an \emph{audit mode}, in which the columns a handler did not declare are
 made inaccessible and a stray access stops the program at the instruction
 that made it.  Every handler a package ships must be tested in that mode.
+The guarantee this gives is that a handler does what its declaration says
+and nothing more, and its strength differs by case.  It is strongest for
+effects that pass through the interface: naming an undeclared column,
+writing to a column declared as read, or raising an undeclared message is
+rejected by the compiler, or at the first call from a language without
+generated headers.  It is strong on a CPU for effects that bypass the
+interface, where audit mode turns a stray access into an immediate fault,
+but only on paths that a test executes, which is why coverage in audit mode
+is required.  It is weaker on a GPU, where memory cannot be protected:
+there an undeclared read of floating-point data is detected and one of
+integer data is not.  And a library that a plugin links statically is
+hidden from the examination made when the plugin is loaded.
+
 Because effects are declared, the order in which handlers run is computed
 and not left to chance: two handlers that touch the same data must be given
 an order, and an omitted one is an error before the run.
