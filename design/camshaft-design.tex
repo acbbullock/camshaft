@@ -39,9 +39,9 @@
   breaklines=true,
 }
 
-\title{\camshaft{}: Research Report\\[0.4ex]
-\large Language, data-model and interface choices for an event-driven\\
-command interpreter underpinning multiphysics packages}
+\title{\camshaft{}: Design Report\\[0.4ex]
+\large Design and rationale for an event-driven command interpreter\\
+underpinning multiphysics packages}
 \author{}
 \date{November 2026}
 
@@ -50,7 +50,8 @@ command interpreter underpinning multiphysics packages}
 
 \begin{abstract}
 \noindent
-This report records the research done before any \camshaft{} code is written.
+This report records the design of \camshaft{}, and the reasoning behind it,
+before any code is written.
 \camshaft{} is intended to be infrastructure for large multiphysics packages: an
 event-driven command interpreter with a user-facing domain-specific language
 (DSL), a schema by which users define and store objects, a dispatch system by
@@ -89,6 +90,11 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+Data that a package depends on but does not own is declared as a dataset,
+checked before the run and imported into the store
+(Section~\ref{sec:datasets}); a strategy for containers is recorded, of which
+only the image for building and testing is made now
+(Section~\ref{sec:containers}).
 A checkpoint holds the schema, the data and a journal of the commands
 executed; a run is restarted by replaying its own driver script against that
 journal, may be modified at a restart by further scripts that become part of
@@ -1861,6 +1867,7 @@ recommendation is the last row of Table~\ref{tab:buildsys}.
   \item[Distribution is through Spack.]
         Spack is how supercomputing sites install software and already
         understands both Cargo and CMake packages~\cite{spack}.
+        Section~\ref{sec:containers} says how containers relate to it.
 \end{description}
 
 One number must be shared by all of this: the interface version.  It should
@@ -1887,7 +1894,7 @@ camshaft/
   tests/                test scripts and baseline summaries
   xtask/                the test orchestrator, a Rust program
   docs/                 portal and narrative documentation (mdBook)
-  research/             this report
+  design/               this report
 \end{lstlisting}
 
 \subsection{Consequences for the design}
@@ -1904,6 +1911,85 @@ camshaft/
         checks for duplicated runtimes when loading a package.
   \item Installation produces the shared and static libraries, the header,
         pkg-config and CMake files, and the Fortran module source.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
+\section{Containers}
+\label{sec:containers}
+
+A container image fixes a software stack so that it can be reproduced and
+moved.  This section records a strategy.  Only one image is made now, the
+one in which the project is built and tested; images for running are
+deferred.
+
+\subsection{Where containers help, and where they are hard}
+
+They help in three places: a reproducible environment for building, images
+for continuous integration (Section~\ref{sec:ci}), and easy use on
+workstations and in clouds.  On large machines four things are hard.
+
+\begin{itemize}
+  \item \emph{MPI.}  For performance a container must use the MPI of its
+        host.  Apptainer documents two ways of doing so: a compatible MPI
+        inside the image that cooperates with the host's launcher, or no
+        MPI in the image and the host's library bound into
+        it~\cite{apptainermpi}.  Both depend on the binary compatibility of
+        the two libraries.  MPICH is the open reference implementation,
+        and the vendor libraries derived from it (Cray MPICH, Intel MPI,
+        MVAPICH) share its binary interface~\cite{mpichabi}; Open MPI does
+        not, so an image built for one family does not run with the other.
+  \item \emph{GPUs.}  Apptainer binds the host's driver libraries into the
+        container, with one option for NVIDIA and another for AMD.  The
+        application must have been built for a version of CUDA or ROCm that
+        the host's driver supports~\cite{apptainergpu}.  Each back end
+        therefore needs an image of its own.
+  \item \emph{The C library.}  Libraries bound in from the host were built
+        against the host's C library, and Apptainer warns that the versions
+        in the container and on the host \enquote{must not be too far
+        apart}~\cite{apptainergpu}.  A container whose C library is older
+        than the host's is the usual failure.
+  \item \emph{Tuning and licenses.}  An image built for a generic processor
+        gives up optimization for a particular one, and some vendor
+        compilers and libraries may not be redistributed in an image.
+\end{itemize}
+
+\subsection{What the design already provides}
+
+\begin{itemize}
+  \item \emph{The MPI~5.0 ABI.}  Section~\ref{sec:mpi} plans a direct
+        binding to the standard ABI.  An image built against it runs with
+        any host MPI that implements it, which removes the division into
+        families.
+  \item \emph{A C interface between the core and plugins}
+        (Section~\ref{sec:api}).  An image of the core is neutral, and the
+        Kokkos adapter and the packages are layers for each back end.
+  \item \emph{The search path for datasets} (Section~\ref{sec:datasets}).
+        Data is mounted when a container runs and is never part of an
+        image, which is the only possibility for data that is licensed or
+        very large.
+  \item \emph{Spack as the route for distribution}
+        (Section~\ref{sec:build}).  Spack generates a recipe for an image
+        from the description of an environment~\cite{spackcontainers}, so
+        images and native installations come from one description.
+\end{itemize}
+
+\subsection{Strategy}
+
+\begin{enumerate}
+  \item \textbf{An image for building and testing, now.}  It holds the
+        compilers, an installed \camshaft{} with its CMake configuration,
+        and the Kokkos adapter, and it is the image that continuous
+        integration uses from M0.  Packages are built inside it and not on
+        the host, which keeps to one Kokkos, one OpenMP runtime and one C++
+        standard library, as Section~\ref{sec:build} requires.
+  \item \textbf{Images for running, later.}  One for each back end,
+        generated from the Spack environment.  These are deferred until a
+        milestone that has a GPU.
+  \item \textbf{Provenance.}  The digest of the image, with the hashes of
+        the datasets in use, is recorded in every output file.
+  \item \textbf{No promise of one image for every machine.}  The kernel, the
+        drivers and the interconnect of the host still decide what works.
+        Spack remains the primary route on the largest machines.
 \end{enumerate}
 
 %------------------------------------------------------------------------------
@@ -2598,6 +2684,8 @@ A checkpoint is more than the tables.
         the journal of commands executed (Section~\ref{sec:replay}).
   \item The system of units of each package and the version of the
         physical constants (Section~\ref{sec:units}).
+  \item The name, version and hash of every external dataset in use, but
+        not its contents (Section~\ref{sec:datasets}).
 \end{itemize}
 
 It is also less than the tables.  What can be rebuilt is not written: ghost
@@ -2868,6 +2956,101 @@ because programs in every language can write it.
 \end{enumerate}
 
 %------------------------------------------------------------------------------
+\section{External datasets}
+\label{sec:datasets}
+
+Many packages depend on data they do not own: tables for an equation of
+state, opacities, cross sections, interatomic potentials.  Such data is
+often large, has versions of its own, and is frequently licensed in a way
+that forbids redistributing it.  It is read while the program runs.
+
+\subsection{Declared, not opened}
+
+A package should not open a file at a path of its own choosing.  That
+hides the dependency from the check invocation, lets a thousand ranks parse
+the same file, and ties the package to the layout of one site.  A package
+instead declares each \emph{dataset} in its definition script
+(Section~\ref{sec:scripts}): a name, a format, the versions it accepts,
+whether it is required, and documentation that says where to obtain it and
+under what license.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.dataset("pusher.cross-sections", {
+  format   = "hdf5",
+  versions = ">= 2.1",
+  required = true,
+  doc = "Collision cross sections.  Licensed; see the package's guide.",
+})
+\end{lstlisting}
+
+Names are resolved to locations through a search path, which a site's
+configuration, an environment variable or the driver sets.  LAMMPS finds
+its potential files in this way, through a list of directories in an
+environment variable~\cite{lammpspaircoeff}.  The generated documentation
+of a package lists its datasets (Section~\ref{sec:docs}).
+
+\subsection{Checked before the run}
+
+The check invocation confirms that each dataset is found, can be read, and
+passes a probe that the package supplies: that it has the right format and
+version, and contains what the driver asks of it.  The pre-flight repeats
+the test on the compute nodes, because the file systems mounted there are
+not always those of the login nodes (Section~\ref{sec:validation}).
+
+\subsection{Imported into the store}
+
+\begin{itemize}
+  \item \emph{Read once.}  The package's reader, which knows the format,
+        runs on one rank, and the result is distributed.  A failure to read
+        is then an orderly error by construction
+        (Section~\ref{sec:errors}).
+  \item \emph{Held as a replicated table.}  The data becomes a bulk table of
+        which every rank holds the whole, as the generated look-up tables
+        of Section~\ref{sec:records} are.  It thereby gains what any table
+        has: declared units, converted on import
+        (Section~\ref{sec:units}), and a copy on a device for kernels that
+        run there.
+  \item \emph{One copy for each node.}  The ranks of a node share one copy
+        through the shared memory that MPI provides~\cite{mpi50}, so that a
+        large table is not held once for every rank.
+\end{itemize}
+
+\subsection{Datasets and files}
+
+An imported dataset is never written to a checkpoint.  Its persistence
+class is derived (Section~\ref{sec:checkpoint-holds}), and its rule for
+rebuilding is to import it again.  The checkpoint records the name, the
+version and a hash of each dataset.  A restart verifies the hash, so a
+table that was changed between two jobs is detected, and output files
+record the same identities for provenance.  A dataset may also be declared
+as not to be exported, in which case a driver cannot ask for its table to
+be written to any file; licensed data then stays where its license allows.
+
+\subsection{Errors and tests}
+
+The kinds of error that a dataset can cause are declared like any others
+(Section~\ref{sec:errors}): not found, wrong format, wrong version, a hash
+that does not match, and a look-up outside the range of a table during a
+run.  The last is found by a check inside the kernel, which names the row.
+
+A public repository cannot hold licensed tables.  A package therefore
+ships small substitutes that carry no license, for its tests, and a test
+that needs the real data is reported as skipped when the data is absent
+(Section~\ref{sec:harness}).
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item Definition scripts declare datasets, and a search path resolves
+        their names.
+  \item A package supplies a probe and a reader for each dataset.
+  \item The store has replicated tables, held once for each node.
+  \item Checkpoints and output files record the identity of each dataset
+        and not its contents, and a dataset can be barred from export.
+  \item The check invocation and the pre-flight both verify datasets.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
 \section{Validation}
 \label{sec:validation}
 
@@ -2908,8 +3091,8 @@ Compilation & In the core, memory errors and data races, by the Rust compiler.  
 Definition check & Names; namespaces and ownership; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
 Loading a package & Each kernel's declared columns, with their types and units, against the schema; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
-Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
-Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
+Driver check & The arguments of every command; references to tables, records and names; that files exist; that every dataset is found and passes its package's probe; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
+Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built; that datasets can be read from the compute nodes; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
 During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
 \bottomrule
 \end{tabularx}
@@ -3409,6 +3592,15 @@ remedy is the one already applied to signal handlers
         which evaluates at points, and the package, which decides what
         points and how to project, has not been tested against a real
         discretization.
+  \item \textbf{Datasets and containers.}  Two things in
+        Sections~\ref{sec:datasets} and~\ref{sec:containers} depend on
+        others.  Keeping one copy of a large table for each node, shared
+        among its ranks, relies on shared memory through MPI, and how that
+        combines with a copy on a device is untried.  And the container
+        strategy rests on host MPI libraries implementing the MPI~5.0 ABI;
+        until they are widespread, an image is tied to one family of MPI
+        implementations, and in every case to the host's drivers and C
+        library.
   \item \textbf{Errors, floating point and ensembles.}  Three parts of
         Sections~\ref{sec:errors}, \ref{sec:floating-point}
         and~\ref{sec:ensemble} are less certain than the rest.  The report
@@ -3508,7 +3700,8 @@ through every milestone from M1.
         Section~\ref{sec:harness}, running the Rust tests and collecting
         coverage.  Tier~1 of the continuous
         integration described in Section~\ref{sec:ci}, on stable Rust, with Kokkos built for its
-        serial and OpenMP back ends in a prebuilt container image; the
+        serial and OpenMP back ends in a prebuilt container image, which is
+        the image for building and testing of Section~\ref{sec:containers}; the
         local script for tier~3.
   \item[M1. Schema and store, host only.]
         Run-time type registry with namespaces and both storage classes;
@@ -3517,7 +3710,9 @@ through every milestone from M1.
         systems of units as records, and physical constants supplied in the
         system in force (Section~\ref{sec:units});
         persistence classes; tables with aligned columns; records and table
-        attributes; a database file written and read on one process,
+        attributes; datasets declared, found through a search path and
+        imported as replicated tables (Section~\ref{sec:datasets}); a
+        database file written and read on one process,
         carrying its schema, with the matching rules of
         Section~\ref{sec:file-schema}, and an empty file as a template; the
         comparison of two database files within declared tolerances;
@@ -3619,6 +3814,8 @@ through every milestone from M1.
         \emph{Also verify:} the completion contract (fence on return, then
         completion events); serial dispatch of Kokkos handlers; Krokkos as a
         route for Rust packages.
+        \emph{Containers:} whether a runtime image for the back end in use
+        is worth making (Section~\ref{sec:containers}).
         \emph{Errors:} a check inside a kernel on the device that names
         the failing row; the scan of written columns on the device.
         \emph{Expressions:} the evaluator of
@@ -3635,7 +3832,9 @@ through every milestone from M1.
         (Section~\ref{sec:checkpoint}): the journal, the two kinds of
         command, a modification script applied at a restart and replayed at
         the next, restart on a different number of ranks, and the restart
-        test.  An error on one rank stopping all ranks at the same event,
+        test.  A dataset read on one rank and distributed, held once for
+        each node, and verified by its hash at a restart.  An error on one
+        rank stopping all ranks at the same event,
         with one merged report.  An ensemble test of one chaotic example,
         with its positive control (Section~\ref{sec:ensemble}).  Global identifiers, ownership and
         ghost rows; the ghost-to-owner primitive; partition and migrate both
@@ -3714,6 +3913,8 @@ do is decided by how it is loaded.
         Section~\ref{sec:tiers} it belongs to.
   \item \emph{Results are reported in the JUnit format}, which continuous
         integration services read.
+  \item \emph{A test that needs a dataset which is absent is reported as
+        skipped,} never as passed (Section~\ref{sec:datasets}).
 \end{itemize}
 
 \begin{lstlisting}[language={[5.3]Lua}]
@@ -4329,6 +4530,7 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+External datasets & Declared in definition scripts and found through a search path; checked by the check invocation and again in the pre-flight; read once and imported into the store as replicated tables with units and device copies; never written to checkpoints, which record only name, version and hash \\
 Checkpoints and restart & A checkpoint holds the effective schema, records, state fields, the clock and a journal; written between cycles, HDF5 first; restart by replaying the same driver, never a separate script; modification scripts are driver commands injected at a cycle boundary, applied once and recorded; fields are state, derived or scratch; a database file with no rows is the template for data from other programs \\
 Analytic fields & Formulas in a driver are symbolic expressions, built directly or by tracing a Lua function once; evaluated into columns with a refresh policy, on the host by the core and on a device by the Kokkos adapter; units opt-in for each expression and then checked throughout; projection decided by the mesh or physics package; a fill on the host by an untraced function allowed once, under an explicit name \\
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
@@ -4341,6 +4543,7 @@ Testing & Tests are driver-role scripts with a test module, each run in its own 
 Continuous integration & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
 Build system & Cargo for the core, with an explicit installation step; CMake for C++ and Fortran bindings and packages against the installed library; Spack for distribution \\
+Containers & An image for building and testing now, in which packages are built; runtime images for each back end, generated from the Spack environment, deferred; host MPI used through the MPI~5.0 ABI; data mounted, never included; Spack remains the primary route on the largest machines \\
 Deferred & WebAssembly components for sandboxed extensions; Rust-specific stable ABIs \\
 \end{xltabular}
 }
