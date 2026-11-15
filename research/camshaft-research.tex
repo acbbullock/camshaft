@@ -97,6 +97,12 @@ another program (Section~\ref{sec:checkpoint}).
 Formulas that a user writes in a driver script are captured as symbolic
 expressions, checked for dimensional consistency before the run and
 evaluated into columns without Lua (Section~\ref{sec:expressions}).
+An error at run time is reported by a package and acted on by the library,
+which stops every rank at the same point and prints one report; packages
+are built to declared floating-point profiles, and results are compared bit
+for bit, within tolerances, or statistically across an ensemble, as each
+problem allows (Sections~\ref{sec:errors}, \ref{sec:floating-point}
+and~\ref{sec:reproducibility}).
 Errors are to be caught at the earliest stage that can detect them: by the
 compilers, by offline checks of definition and driver scripts, when a package
 is loaded, and before the first cycle of a run, in preference to during it
@@ -1326,11 +1332,13 @@ following properties.
         handlers are registered from any language.
   \item \textbf{Errors as return codes.}  A Rust panic must never unwind into
         foreign code; every entry point catches panics and converts them to an
-        error code with a retrievable message.
+        error code with a retrievable message.  Section~\ref{sec:errors}
+        says what a package does with an error of its own.
   \item \textbf{Explicit versioning.}  A plugin states the interface version
         it was built against, and the core refuses versions it cannot serve.
         It does so when the plugin is loaded, before anything runs
-        (\ref{req:early}).
+        (\ref{req:early}).  A plugin also states the floating-point profile
+        it was built to (Section~\ref{sec:floating-point}).
 \end{itemize}
 
 The interface should be written in Rust as \code{extern "C"} functions, with
@@ -1554,7 +1562,8 @@ should let the adapter configure the thread count for both.
 \paragraph{Errors.}  A C++ exception that propagates into Rust is undefined
 behavior.  Handlers must catch everything and return an error code, as in
 the sketch, and the adapter should provide a wrapper that does this so that
-package authors cannot forget.
+package authors cannot forget.  Section~\ref{sec:errors} adds checks that
+can be made inside a kernel on a device.
 
 \paragraph{Build.}  Kokkos packages are built with CMake.  \camshaft{} should
 install its C header and library together with a CMake package configuration
@@ -1705,7 +1714,7 @@ language, not the package author, should meet them.
 
 Three process-wide rules follow from sharing a process.  No package may
 terminate the process itself; a fatal error is returned to the library, which
-aborts through MPI so that every rank stops.  Signal handlers are installed
+aborts through MPI so that every rank stops (Section~\ref{sec:errors}).  Signal handlers are installed
 only by the library, since several of the runtimes above would otherwise
 compete for them.  And interactive input is read on one rank only and
 broadcast, so that the deterministic event ordering of
@@ -3105,6 +3114,263 @@ cycle on which its message is first sent.
 \end{enumerate}
 
 %------------------------------------------------------------------------------
+\section{Errors at run time}
+\label{sec:errors}
+
+Section~\ref{sec:validation} is about catching mistakes before a run.  Some
+failures can only happen during one: a negative density, a solver that
+does not converge, a full disk, a fault in a library.  This section says
+what a package does when it meets one and what the library does next.
+
+\subsection{Report, do not abort}
+
+A package is given one function for errors.  It records a structured error
+and the package then returns a failure status from its handler.  It does
+not stop the program.  A function that printed a backtrace and aborted
+would be the natural thing to offer, and it is the wrong thing, for four
+reasons.
+
+\begin{itemize}
+  \item \emph{MPI.}  One rank that aborts leaves the others waiting or
+        killed in the middle of writing, and a thousand ranks each printing
+        a backtrace cannot be read.
+  \item \emph{Hosts.}  When Python or Julia hosts the library
+        (Section~\ref{sec:build}), an abort ends the user's session.  There
+        the error should become an exception.
+  \item \emph{Devices.}  Code inside a kernel on a GPU cannot print, unwind
+        the stack, or abort cleanly.
+  \item \emph{Tests.}  The harness expects an error by its identifier
+        (Section~\ref{sec:harness}), so an error has to be a value and not
+        a dead process.
+\end{itemize}
+
+In C++ the Kokkos adapter offers a macro that throws, since its wrapper
+already catches everything at the boundary (Section~\ref{sec:kokkos-needs}).
+Fortran's \code{error stop} must not be used in a package.
+
+\subsection{Three kinds of context}
+
+In order of usefulness:
+
+\begin{enumerate}
+  \item \textbf{The logical context.}  The dispatcher always knows the
+        cycle, the rank, the command, the message, the package, the kernel,
+        the table and the device.  Keeping it costs nothing measurable,
+        since it changes once per table and not once per element; it is
+        available in a release build; and it answers most questions.
+        PETSc works in this way: its functions return error codes, and on
+        an error the library itself prints the chain of calls the code
+        passed back through~\cite{petscerrors}.
+  \item \textbf{The location in the script.}  Lua's frames are not native
+        frames, so the line of the driver, or the handler, that issued the
+        command comes from a Lua traceback.
+  \item \textbf{A native backtrace.}  This is for developers.  It needs
+        debugging information, it shows nothing useful of code on a device,
+        and it is captured only on request and only on the rank that
+        failed.
+\end{enumerate}
+
+\subsection{Errors are data}
+
+A package declares the kinds of error it can raise in its definition
+script, each with an identifier and documentation, exactly as it declares
+its parameters.  The generated documentation then lists what a package can
+raise and what to do about it (Section~\ref{sec:docs}), and tests can
+expect each one (Section~\ref{sec:harness}).
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.error("pusher.negative-energy", {
+  doc = "A particle's kinetic energy became negative.  Reduce pusher.cfl.",
+})
+\end{lstlisting}
+
+\paragraph{Checks inside kernels.}  A kernel on a device cannot report an
+error where it finds one.  The adapter therefore supplies a check that
+records the first failing row and nothing else, and after the kernel it
+turns that record into an error that names the row by its global
+identifier.  For a failure of the physics, the row is worth more than any
+backtrace.
+
+\begin{lstlisting}[language=C++]
+Kokkos::parallel_for("advance", n, KOKKOS_LAMBDA(const int i) {
+  // ... advance particle i ...
+  cam::check(status, energy(i) >= 0.0, i);   // records the first failing row
+});
+return cam::finish(batch, status, "pusher.negative-energy");
+\end{lstlisting}
+
+The names are placeholders, as elsewhere.  The report that results looks
+like this.
+
+\begin{lstlisting}
+error[pusher.negative-energy] at cycle 5234, on 3 of 4096 ranks
+  kernel   boris (package pusher), answering pusher.advance
+  table    electrons, on device cuda:0; first row: global id 918273645
+  script   run.lua:21, in cam.run
+  A particle's kinetic energy became negative.  Reduce pusher.cfl.
+  Details for each rank are in errors/rank-*.log
+\end{lstlisting}
+
+\subsection{What the library does}
+
+\paragraph{Two classes of failure.}
+
+\begin{itemize}
+  \item \emph{Orderly errors.}  A handler returned a failure.  Every rank
+        learns of it at the next boundary between events, through one small
+        reduction for each event, and all ranks stop at the same point of
+        the same cycle.  This is the collective step that
+        Section~\ref{sec:dispatch} requires of anything that originates on
+        one rank.
+  \item \emph{Faults.}  A segmentation fault, a panic in the core, an
+        error from MPI, a trapped floating-point exception.  There is no
+        chance to coordinate.  The library's signal handlers
+        (Section~\ref{sec:build}) print the logical context and whatever
+        backtrace they can, and abort every rank.
+\end{itemize}
+
+\paragraph{One report.}  The reports of the ranks are gathered, duplicates
+are merged into one entry with a count, and the result is printed once.
+The full detail for each rank is written to files.
+
+\paragraph{Warnings.}  A warning is deduplicated across ranks and across
+cycles, and printed with a count, so that a condition met in every cell of
+every cycle does not flood the output.
+
+\paragraph{Hosts and exit codes.}  The library returns the error to its
+host.  The default executable aborts through MPI; a Python or Julia host
+raises an exception.  The executable uses distinct exit codes for an error
+of input, an error at run time, a fault, and a stop on the wall clock, so
+that a job script in a chain can submit the next job after a stop on the
+wall clock and not after an error.
+
+\paragraph{Diagnostic dumps.}  After an orderly error the cycle is half
+finished, so the state cannot be written as a checkpoint from which a run
+could continue.  It can be written as a diagnostic file, marked as not
+restartable, for examination afterward.  Such a file can be very large,
+so it is written only when the driver asks for it.
+
+\paragraph{Deferred: retrying a cycle.}  The core knows which columns each
+kernel writes.  It could therefore save them at the start of a cycle and,
+when a package rejects the cycle, restore them and try again with a smaller
+time step, without any code in the package.  That is a real capability for
+stiff problems.  It doubles the memory held for state fields, and it is
+recorded here as a possibility and not adopted.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item The C interface has a function that records a structured error; a
+        handler reports and returns, and never terminates the process.
+  \item The dispatcher keeps the logical context current.
+  \item Definition scripts declare errors, with identifiers and
+        documentation.
+  \item The Kokkos adapter supplies a check that can be used inside a
+        kernel and names the failing row.
+  \item Orderly errors stop all ranks at the next boundary between events;
+        faults abort at once; either way one merged report is printed.
+  \item Warnings are deduplicated; exit codes distinguish the classes of
+        failure; diagnostic dumps are written on request.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
+\section{Floating-point behavior}
+\label{sec:floating-point}
+
+\subsection{Build profiles}
+
+Conformance to IEEE arithmetic cannot be one requirement, because compilers
+differ in what they do by default and a build with fast-math optimizations
+departs from it on purpose.  GCC contracts a multiplication and an addition
+into one fused operation by default outside its strictly conforming
+modes~\cite{gccopt}, and Intel's compiler uses its \enquote{fast}
+floating-point model by default~\cite{intelfp}.  Three profiles are
+therefore defined.  The installed CMake configuration
+(Section~\ref{sec:build}) sets the flags for each compiler, and a plugin
+records the profile it was built to.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l L L@{}}
+\toprule
+Profile & What it promises & Use \\
+\midrule
+Strict & Value-safe; no contraction into fused operations; traps available & Debugging and reference results \\
+Release & Value-safe; contraction allowed & The default for packages that are shipped \\
+Fast & Reordering allowed; the compiler may assume that no value is infinite or not a number & Chosen explicitly by a package \\
+\bottomrule
+\end{tabularx}
+\caption{Floating-point build profiles.}
+\label{tab:fp-profiles}
+\end{table}
+
+The Rust core is strict by construction, since stable Rust has no option
+for fast-math.
+
+\subsection{Exceptions}
+
+Trapping floating-point exceptions in a debugging build is worth having,
+because it is the one case in which a native backtrace points at the cause
+(Section~\ref{sec:errors}).  It reaches less than it seems to.
+
+\begin{itemize}
+  \item \emph{Rust.}  The Rust compiler assumes the default floating-point
+        environment, and altering it while Rust code runs is undefined
+        behavior~\cite{rustfenv}.  Traps can be enabled only around calls
+        into the kernels of packages, and never in the core.
+  \item \emph{Vectorized code.}  A lane that is masked or computed
+        speculatively can raise a trap that the scalar code would not, so
+        trapping belongs to the strict profile alone.
+  \item \emph{Devices.}  GPUs do not trap.
+\end{itemize}
+
+Two complements cover what trapping cannot.
+
+\begin{itemize}
+  \item \emph{Checking the exception flags after each handler.}  This is
+        cheap, it works only on the host, and it names the kernel.
+  \item \emph{Scanning the columns a kernel wrote for values that are not
+        finite.}  This works on a device, and it uses the declarations of
+        what each kernel writes that the core already has
+        (Section~\ref{sec:device-memory}).  A build to the fast profile, in
+        which the compiler may have removed a package's own tests for such
+        values, depends on it.
+\end{itemize}
+
+\subsection{The library owns the floating-point environment}
+
+A build with fast-math can change the rounding and the treatment of
+denormal numbers for the whole process.  Until version~13, GCC added
+start-up code that did so even to a shared library built with those
+options~\cite{gcc13}.  With plugins, one package could then change the
+arithmetic of the core and of every other package without any sign.  The
+remedy is the one already applied to signal handlers
+(Section~\ref{sec:build}).
+
+\begin{itemize}
+  \item \emph{The dispatcher sets a known environment before each handler
+        and restores it afterward.}  Each package runs in the environment
+        its profile declares, and nothing leaks from one to another.
+  \item \emph{The core examines the environment after loading each plugin}
+        and names any package that changed it.
+\end{itemize}
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item The installed CMake configuration defines the three profiles for
+        each supported compiler, and a plugin records its profile.
+  \item The dispatcher sets and restores the floating-point environment
+        around every handler, and enables traps there in the strict
+        profile.
+  \item The core can check exception flags after a handler and scan the
+        columns it wrote, on request.
+  \item The harness compares profiles
+        (Section~\ref{sec:reproducibility}).
+\end{enumerate}
+
+%------------------------------------------------------------------------------
 \section{Risks and open questions}
 \label{sec:risks}
 
@@ -3143,6 +3409,16 @@ cycle on which its message is first sent.
         which evaluates at points, and the package, which decides what
         points and how to project, has not been tested against a real
         discretization.
+  \item \textbf{Errors, floating point and ensembles.}  Three parts of
+        Sections~\ref{sec:errors}, \ref{sec:floating-point}
+        and~\ref{sec:ensemble} are less certain than the rest.  The report
+        that follows a fault is made from inside a signal handler and is
+        best-effort by nature.  Trapping floating-point exceptions depends
+        on the processor and the operating system, and which of the target
+        platforms support it has not been checked.  And an ensemble test
+        gives a statistical answer: its power depends on the observables a
+        package chooses, and choosing them well is a skill that package
+        developers will have to acquire.
   \item \textbf{Testing tools that are not settled.}  Sanitizer support in
         Rust is unstable, so the instrumented builds of
         Section~\ref{sec:sanitizers} depend on the nightly compiler and may
@@ -3264,7 +3540,9 @@ through every milestone from M1.
         with cached call lists.  The run loop of Section~\ref{sec:cycles}:
         the cycle counter, the clock, messages with combined results, the
         time-step proposal, and stop conditions, absolute and relative.
-        The pre-flight checks before the first cycle.  Table version counters and invalidation of
+        The pre-flight checks before the first cycle.  The error function,
+        the logical context kept by the dispatcher, the report, and exit
+        codes (Section~\ref{sec:errors}).  Table version counters and invalidation of
         cached lists.  The adaptation sequence of
         Section~\ref{sec:mesh-change} on the block-based mesh, with transfer
         maps and per-field transfer rules; dispatch of one message to the
@@ -3309,7 +3587,11 @@ through every milestone from M1.
         compatibility check.  Unit tests of each kernel as test scripts,
         registered with CTest; dispatch coverage; the address and
         undefined-behavior sanitizers on a build instrumented in every
-        language.
+        language.  Errors declared in a definition script and raised from
+        C++ and Fortran; the three floating-point profiles in the installed
+        CMake configuration, the environment set and restored around each
+        handler, traps in the strict profile, and the profile variant of
+        the test scripts (Section~\ref{sec:floating-point}).
         \emph{Measure:} that the four perform identically when compared like
         with like (single-threaded against Kokkos serial, threaded against
         Kokkos OpenMP), which confirms that the interface adds no cost.
@@ -3337,6 +3619,8 @@ through every milestone from M1.
         \emph{Also verify:} the completion contract (fence on return, then
         completion events); serial dispatch of Kokkos handlers; Krokkos as a
         route for Rust packages.
+        \emph{Errors:} a check inside a kernel on the device that names
+        the failing row; the scan of written columns on the device.
         \emph{Expressions:} the evaluator of
         Section~\ref{sec:expressions} in the Kokkos adapter, measured
         against a hand-written kernel for the same formula.
@@ -3351,7 +3635,9 @@ through every milestone from M1.
         (Section~\ref{sec:checkpoint}): the journal, the two kinds of
         command, a modification script applied at a restart and replayed at
         the next, restart on a different number of ranks, and the restart
-        test.  Global identifiers, ownership and
+        test.  An error on one rank stopping all ranks at the same event,
+        with one merged report.  An ensemble test of one chaotic example,
+        with its positive control (Section~\ref{sec:ensemble}).  Global identifiers, ownership and
         ghost rows; the ghost-to-owner primitive; partition and migrate both
         meshes with dependent rows found through relations; rebalance after
         adaptation.
@@ -3480,6 +3766,8 @@ anything more being written.
   \item \emph{Device}: the host against a device, within tolerance.
   \item \emph{Sanitizer}: the same script under the instrumented builds of
         Section~\ref{sec:sanitizers}.
+  \item \emph{Profile}: the release and fast floating-point profiles against
+        the strict one, within tolerance (Section~\ref{sec:reproducibility}).
 \end{itemize}
 
 \subsection{Kinds of testing}
@@ -3498,6 +3786,7 @@ Coverage & cargo-llvm-cov~\cite{cargollvmcov} for Rust and for C and C++ built w
 Address and undefined-behavior sanitizers & Rust, the vendored Lua, the Kokkos adapter and the example packages, all built instrumented & Needs nightly Rust; does not reach code on a GPU \\
 Memory sanitizer & The core and the vendored Lua only & Cannot cover the libraries a full build links \\
 Fuzzing & The file reader and the validator & Bounded time in each run \\
+Numerical reproducibility & The comparisons of Section~\ref{sec:reproducibility}: bit for bit, within tolerance, or across an ensemble & An ensemble is costly and suits only problems that have natural variability \\
 \bottomrule
 \end{tabularx}
 \caption{Kinds of testing.}
@@ -3575,6 +3864,148 @@ are fuzzed, with cargo-fuzz~\cite{cargofuzz}, for a bounded time in each
 nightly run, and any input that causes a failure is kept as a regression
 test.
 
+\subsection{Numerical reproducibility}
+\label{sec:reproducibility}
+
+\enquote{Reproducible} means four different things, and each has its own
+expectation.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}L >{\raggedright\arraybackslash}p{52mm}@{}}
+\toprule
+Comparison & Expectation \\
+\midrule
+The same binary on the same layout, run twice & Bit for bit \\
+Different numbers of ranks or threads, or a different device & Within each field's tolerance \\
+The strict floating-point profile against the release or fast profile & Within each field's tolerance \\
+Different compilers & Within each field's tolerance \\
+\bottomrule
+\end{tabularx}
+\caption{What reproducibility is expected of each comparison.}
+\label{tab:reproducibility}
+\end{table}
+
+The third row is tested by a variant the harness derives from every test
+script.  The script is run under the strict profile of
+Section~\ref{sec:floating-point} to produce the reference, then under the
+release and fast profiles, and the results are compared within the
+tolerances the fields declare.  A package that chooses the fast profile
+must pass.  Tests on the host are run under the strict profile with traps
+enabled around kernels, so that an invalid operation stops the test where
+it occurs.
+
+Two cautions apply.  The fast profile may remove a package's own tests for
+values that are not numbers, so a build to that profile depends on the scan
+of written columns in Section~\ref{sec:floating-point}.  And a chaotic
+problem amplifies differences in the last bit until they are as large as
+the solution, so a comparison within tolerance must be short, or must
+compare statistics, which is the subject of Section~\ref{sec:ensemble}.
+
+A comparison is therefore one of three kinds, and each test declares which
+it uses: bit for bit, within tolerance, or across an ensemble.
+
+One thing is deferred.  A minimum, a maximum and a logical result are the
+same in whatever order they are combined, but a sum is not, so a global
+diagnostic such as a total energy changes in its last bits with the number
+of ranks.  A summation that is independent of order would remove that, at
+some cost, and can be added to the combined results of
+Section~\ref{sec:mechanism} later.
+
+\subsection{Ensemble testing}
+\label{sec:ensemble}
+
+For a chaotic problem no tolerance separates a harmless change from a
+harmful one beyond a short time.  The alternative is to ask whether two
+simulations are \emph{statistically indistinguishable}: whether a new run
+could have been drawn from the distribution that the reference
+configuration produces.  Climate modeling has established practice here
+(Table~\ref{tab:ensemble}), developed because comparison bit for bit
+stopped being possible for its models.  Molecular dynamics has a related
+practice of testing that a simulation samples the statistical distribution
+it claims to~\cite{physicalvalidation}.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{34mm} L L@{}}
+\toprule
+Method & How it works & Result of note \\
+\midrule
+CESM-ECT~\cite{cesmect} & 151 one-year runs that differ by perturbations of order $10^{-14}$ in one initial field; principal components of global means; three new runs are tested & A failure is declared if at least three components fail in at least two of the three runs, a rule tuned to a false-positive rate of 0.5\% \\
+UF-CAM-ECT~\cite{ufcamect} & The same after only nine time steps, with an ensemble of 350 & About 70 times cheaper; more sensitive to localized changes and blind to slow ones \\
+Time-step convergence~\cite{tsc} & Twelve runs of five minutes; compares how the error converges with the time step & Cheap; misses diagnostics that do not feed back into the state \\
+Multivariate tests~\cite{mahajan2019} & Tests of equality of distribution between two ensembles of about thirty runs & Accompanied by a formal analysis of power against ensembles altered on purpose \\
+\bottomrule
+\end{tabularx}
+\caption{Published methods for testing that simulations are statistically
+indistinguishable.}
+\label{tab:ensemble}
+\end{table}
+
+The climate tests pass changes of compiler and of optimization and fail
+changes to the parameters of the physics, which is the discrimination
+wanted when a package is moved to the fast profile or to a device.
+
+\paragraph{The decision.}  Ensemble testing is adopted as a third kind of
+comparison.  A test must choose it explicitly.  A positive control is
+mandatory.  The first statistical rule is that of CESM-ECT, because its
+false-positive rate is documented.
+
+\paragraph{How it fits the harness.}
+
+\begin{itemize}
+  \item \emph{Members are cheap to define.}  A test declares the size of the
+        ensemble and a perturbation.  The harness applies the perturbation
+        at cycle~0 through the random source keyed by global identifier
+        (Section~\ref{sec:expressions}), so every member can be reproduced.
+  \item \emph{Members are independent processes,} which the orchestrator
+        already schedules.
+  \item \emph{Summaries are small.}  Database files describe themselves, so
+        a generic reduction computes global statistics of each field, and
+        the summary of a reference ensemble is kept in the repository as
+        the summaries of baselines are (Section~\ref{sec:harness}).
+  \item \emph{A test compares a few new runs with the stored summary} and
+        reports a pass or a failure at a stated false-positive rate.
+\end{itemize}
+
+\paragraph{Limits, and the safeguards against them.}
+
+\begin{itemize}
+  \item \emph{Failing to detect a difference does not prove equivalence.}
+        A pass means only that no difference could be detected with that
+        many runs.  Every ensemble test therefore ships with at least one
+        positive control, a variant altered on purpose that must fail, and
+        the harness does not trust the passes of a test whose control does
+        not fail.
+  \item \emph{It works only where variability exists.}  In a problem that is
+        not chaotic, perturbations do not grow, the spread of the ensemble
+        stays near the size of the perturbation, and a harmless change in
+        the last bit appears statistically distinguishable.  The harness
+        measures the spread, and reports a problem as unsuited to ensemble
+        testing when its members do not diverge beyond the tolerance of the
+        fields.  Comparison within tolerance remains right for those.
+  \item \emph{What is summarized decides what can be detected.}  The two
+        CESM tests disagree in both directions: the short one detected a
+        change confined to 0.36\% of grid cells that the one-year test
+        passed, and passed slow changes that the long one
+        detected~\cite{ufcamect}.  The harness supplies the statistics.
+        The observables (conserved quantities, spectra, distribution
+        functions) are declared by the package, which is the only party
+        that knows which matter.
+  \item \emph{A false-positive rate above zero means spurious failures.}
+        On a failure the harness enlarges the sample before declaring it.
+  \item \emph{The reference defines what is correct.}  An error present in
+        the reference ensemble passes forever.  Replacing a reference
+        ensemble after an intended change is an explicit command, as
+        replacing a baseline is.
+  \item \emph{Cost.}  A reference ensemble is hundreds of runs, which
+        confines the method to small configurations and short runs.
+        Ensemble tests run nightly for small problems and in a campaign for
+        large ones, and never on every push.
+\end{itemize}
+
 \subsection{What GitHub's hosted runners provide}
 
 For a public repository the standard hosted runners are free and
@@ -3639,10 +4070,10 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit and property tests on Linux (both architectures) and macOS; the test scripts on the host, with their check, restart and rank variants; dispatch coverage and coverage of errors; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
-2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; the test scripts under the address and undefined-behavior sanitizers; the memory sanitizer on the core alone; fuzzing for a bounded time; line coverage; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
+1 & Hosted; every push and pull request & Formatting and lints; unit and property tests on Linux (both architectures) and macOS; the test scripts on the host, with their check, restart and rank variants, under the strict floating-point profile with traps enabled around kernels; dispatch coverage and coverage of errors; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
+2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; the test scripts under the address and undefined-behavior sanitizers; the memory sanitizer on the core alone; fuzzing for a bounded time; line coverage; the release and fast profiles against the strict one; ensemble tests of small problems; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
 3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; the device variants of the test scripts; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
-4 & A cluster; per campaign & Vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
+4 & A cluster; per campaign & Ensemble tests of large problems; vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
 \bottomrule
 \end{tabularx}
 \caption{Testing tiers.}
@@ -3903,6 +4334,9 @@ Analytic fields & Formulas in a driver are symbolic expressions, built directly 
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
+Run-time errors & A package reports a structured error and returns; it never aborts.  The library stops every rank at the next event boundary and prints one merged report with the logical context, the script location and, on request, a native backtrace; faults are reported as far as possible and abort every rank; errors are declared in definition scripts; diagnostic dumps on request; retry of a failed cycle deferred \\
+Floating point & Three build profiles, strict, release and fast, with release the default for shipped packages; the library owns the floating-point environment and sets it around each handler; traps in the strict profile, flag checks and scans of written columns elsewhere \\
+Numerical reproducibility & Bit for bit on the same binary and layout; within per-field tolerances across ranks, devices, profiles and compilers; ensemble testing by the CESM-ECT rule, chosen explicitly and with mandatory positive controls, where a problem is chaotic; order-independent summation deferred \\
 Testing & Tests are driver-role scripts with a test module, each run in its own process, from which the harness derives check, restart, rank, device and sanitizer variants; one orchestrator written in Rust; database files compared within tolerances declared per field, with only small summaries of baselines in the repository; line coverage reported, dispatch coverage and coverage of errors enforced; address and undefined-behavior sanitizers on a build instrumented in every language, the memory sanitizer on the core alone; fuzzing of the file reader and the validator \\
 Continuous integration & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
