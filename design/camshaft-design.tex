@@ -90,6 +90,10 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+Packages declare what they depend on, other packages and external libraries
+alike, and the dependencies form a directed graph without cycles; a package
+may compose at compile time with the packages it depends on, and reaches all
+others through messages and data (Section~\ref{sec:packages}).
 Data that a package depends on but does not own is declared as a dataset,
 checked before the run and imported into the store
 (Section~\ref{sec:datasets}); a strategy for containers is recorded, of which
@@ -434,7 +438,7 @@ and cycles, never to the number of cells or particles.  A user-supplied
 expression that must be evaluated per element (an initial condition, a source
 term) is the one place this is hard.  Section~\ref{sec:expressions} settles
 how it is handled.  The formula is captured as a symbolic expression and
-evaluated without Lua; a compiled kernel in a package is always available;
+evaluated without Lua; a compiled handler in a package is always available;
 and for a formula that cannot be captured, one exception to the rule above is
 allowed, a fill of a column on the host, once, under an explicit name.
 Calling back into Lua from inside a kernel is not acceptable, and is
@@ -446,7 +450,7 @@ impossible on a GPU.
 Two kinds of people write \camshaft{} scripts.  The developer of a mesh or
 physics package writes scripts that \emph{define} things: the package's types
 and their fields, its configuration objects and parameters, its messages, and
-the compiled kernel that answers each message.  The user of those packages
+the compiled handler that answers each message.  The user of those packages
 writes scripts that \emph{drive} a run: they create objects of types that
 already exist, set parameters and issue commands.  The two have different
 owners and different lifetimes.  A definition must stay in step with compiled
@@ -498,7 +502,7 @@ loading of a package and a check made before the run.
         (Section~\ref{sec:docs}), and validating a driver script without
         running it.
   \item \textbf{Bindings are checked once, when the package is loaded.}  A
-        compiled kernel declares the columns it reads and writes, with their
+        compiled handler declares the columns it reads and writes, with their
         types (Section~\ref{sec:device-memory}).  When the handler is bound,
         the core checks that declaration against the schema and resolves
         names to column handles.  Nothing is looked up or checked inside a
@@ -511,7 +515,7 @@ loading of a package and a check made before the run.
         to a namespace, owned by whoever defined it.  New types may be
         defined at any time, including by a driver in its own namespace.  A
         driver or another package may \emph{add} fields to an existing type
-        (a tracer, a diagnostic); because kernels bind to columns by name,
+        (a tracer, a diagnostic); because handlers bind to columns by name,
         an added column disturbs none of them.  Nobody may change or remove
         a field of a type they do not own once objects of it exist, and the
         owner does so only through the schema version and a migration
@@ -557,10 +561,10 @@ local Particle = cam.type("pusher.Particle", {
 cam.param("pusher.cfl", cam.f64, { default = 0.5 })
 cam.message("pusher.advance", { schedule = "cycle" })
 
--- The compiled kernels that answer the package's message and the core's
+-- The compiled handlers that answer the package's message and the core's
 -- request for a limit on the time step.  Both are checked at load.
-Particle:answers("pusher.advance", cam.kernel("boris"))
-Particle:answers("cam.propose_dt", cam.kernel("cfl_limit"))
+Particle:answers("pusher.advance", cam.handler("boris"))
+Particle:answers("cam.propose_dt", cam.handler("cfl_limit"))
 \end{lstlisting}
 
 The second is a driver script.
@@ -605,13 +609,13 @@ designed.
 Name & What it stands for \\
 \midrule
 \code{pusher} & The example package, and the namespace that owns its definitions.  A \enquote{particle pusher} is the part of a particle simulation that advances each particle's position and velocity over a time step \\
-\code{boris} & The compiled kernel, in the package's library, that answers \code{pusher.advance}.  It is named after the Boris algorithm, the usual pusher for charged particles in electric and magnetic fields~\cite{boris} \\
+\code{boris} & The compiled handler, in the package's library, that answers \code{pusher.advance}.  It is named after the algorithm its kernel carries out, the Boris algorithm, the usual pusher for charged particles in electric and magnetic fields~\cite{boris} \\
 \code{pusher.Particle} & A bulk type.  Each particle is a row, and \code{position} and \code{velocity} are its fields \\
 \code{pusher.Species} & A record type holding what all particles of one kind share: a name, a charge and a mass.  The driver supplies the values for the electron, in SI units \\
 \code{pusher.cfl} & An example of a package parameter.  It is named after the Courant--Friedrichs--Lewy number, a dimensionless limit on the size of a time step, and it scales the limit that \code{cfl\_limit} proposes \\
 \code{pusher.advance} & A message asking a table of particles to advance by one time step.  The package schedules it to be sent in every cycle \\
 \code{cam.propose\_dt} & Not a package's name but the core's: the standard message that asks for a limit on the next time step (Section~\ref{sec:cycles}) \\
-\code{cfl\_limit} & The compiled kernel that answers \code{cam.propose\_dt} with the largest time step the particles allow \\
+\code{cfl\_limit} & The compiled handler that answers \code{cam.propose\_dt} with the largest time step the particles allow \\
 \code{tracer} & A field added by the user, not by the package: a label, say, for following chosen particles through the output \\
 \code{electrons} & A table of particles, with a name chosen by the user \\
 \code{cycle\_end} & The event that the core emits at the end of every cycle (Section~\ref{sec:cycles}) \\
@@ -674,7 +678,7 @@ are fixed here.
         that is valid in every column of its table.
   \item[Column.]
         All the values of one field, across every row of a table, in one
-        contiguous buffer.  Columns are what a kernel receives.
+        contiguous buffer.  Columns are what a handler is given and what its kernels loop over.
 \end{description}
 
 \begin{lstlisting}
@@ -703,7 +707,7 @@ Object-oriented term & \camshaft{} term & Where the correspondence stops \\
 Class & Type & A type describes data only.  There is no inheritance; types are related through declared relations between tables \\
 Member variable & Field & Stored as a column, apart from the object's other fields.  There are no private members: any package may use a field by declaring that it reads or writes it \\
 Instance & Row & A row has no address and no lifetime of its own.  It is identified by its table and an index that can change \\
-Method & Handler bound to a message for a type & Called once per table with a range of rows, not once per object.  The body is a compiled kernel, and there is no per-object virtual call \\
+Method & Handler bound to a message for a type & Called once per table with a range of rows, not once per object.  Its work is done by compiled kernels, and there is no per-object virtual call \\
 Static member & Table attribute (Section~\ref{sec:records}) & One value shared by all the rows of a table, not by every object of the type \\
 Constructor, destructor & Commands that create and delete rows & Bulk operations on a table.  Initial values are written by a handler or by filling columns \\
 \bottomrule
@@ -949,10 +953,10 @@ styles that determine the units of every quantity~\cite{lammpsunits}.
 
 \paragraph{Several systems of units in one run.}  Packages in one run need
 not share a system of units.  Each column is stored in the unit its owner
-declared.  A kernel declares the unit it expects of every column it uses,
+declared.  A handler declares the unit it expects of every column it uses,
 and the binding check refuses a mismatch when the package is loaded
 (Section~\ref{sec:validation}).  A mesh package in centimeters and a physics
-package in meters can therefore coexist so long as no kernel reads a column
+package in meters can therefore coexist so long as no handler reads a column
 in a unit it did not expect.  Where two such packages must share a column,
 one of them must be unit-agnostic, or a conversion must be requested
 explicitly.  The core may offer that conversion as a bulk operation, and
@@ -961,7 +965,7 @@ never applies it unasked.
 \paragraph{Where units are enforced.}  Units are metadata on columns and on
 the fields of records.  A kernel sees plain numbers and pays nothing.  The
 checks are made at the two boundaries: when a value enters a record
-(Section~\ref{sec:validation}) and when a kernel is bound.  A package is
+(Section~\ref{sec:validation}) and when a handler is bound.  A package is
 free to use a units library inside its own kernels as well.
 
 \paragraph{Files.}  Output files and checkpoints record, for every field,
@@ -1000,14 +1004,14 @@ Arrow or DLPack (which includes NumPy, CuPy, PyTorch, cuDF and Julia) can view
 Each column should own up to two buffers, one on the host and one on a device,
 with flags recording which is current.  This is the pattern Kokkos calls a
 dual view~\cite{kokkos3}.  It keeps synchronization explicit and lazy: a
-kernel declares which columns it reads and writes and where it runs, and the
+handler declares which columns it reads and writes and where it runs, and the
 store copies only what is stale.  The cost of getting this wrong is large.
 The Rust offload study found that transferring data automatically at every
 kernel launch could be more than $400\times$ slower on an AMD MI250X than the
 same code with data moved explicitly, once per benchmark~\cite{rustoffload}.
 
-Kernels declaring their reads and writes has a second benefit, taken from
-Legion: the scheduler can see which kernels are independent and run them
+Handlers declaring their reads and writes has a second benefit, taken from
+Legion: the scheduler can see which handlers are independent and run them
 concurrently without the package author writing any threading code.
 
 \subsection{Persistence}
@@ -1038,6 +1042,27 @@ sequence of control events without communicating them.  Event ordering must
 therefore be deterministic.  Events that originate on one rank (a local error,
 a locally detected condition) need an explicit collective step before they
 become global events.
+
+\subsection{Handlers and kernels}
+\label{sec:handlers}
+
+Two words are used with fixed meanings throughout this report.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Handler.]
+        A function with C linkage, running on the host, that a package
+        registers to answer a message for a type.  A handler is what
+        dispatch calls.  It carries a declaration: the columns it reads and
+        writes, with their types and units, and the device it runs on.
+  \item[Kernel.]
+        A data-parallel loop that a handler launches, on the host or on a
+        device.  Dispatch never sees inside a kernel.  Everything in it is
+        resolved when it is compiled.
+\end{description}
+
+A handler usually launches one kernel or a few.  The distinction matters
+most on a GPU, where the handler runs on the host and its kernels run on
+the device (Section~\ref{sec:dispatch-devices}).
 
 \subsection{Cycles, time and the run loop}
 \label{sec:cycles}
@@ -1093,8 +1118,8 @@ events.
   \item The time step is chosen, when there is a clock.
   \item The messages that packages have scheduled in the cycle are sent.  A
         package schedules a message when it declares it.  The order among
-        packages is the driver's to set, and defaults to the order in which
-        the packages were loaded.
+        packages is the driver's to set, and defaults to an order consistent
+        with their dependencies (Section~\ref{sec:packages}).
   \item The clock is advanced and the cycle counter is incremented.
   \item \code{cycle\_end} is emitted.
   \item The stop conditions are tested.
@@ -1148,15 +1173,15 @@ Dispatching dynamically \emph{per object} is therefore ruled out by
 \ref{req:perf} and \ref{req:port}.  Dispatching dynamically \emph{per table}
 is essentially free.  If a table holds a million objects of one type, one
 table lookup selects the handler and one indirect call invokes it; the handler
-is a compiled kernel that loops over the columns with everything inside the
+launches a compiled kernel that loops over the columns with everything inside the
 loop statically resolved, inlined and vectorized.  The dispatch overhead is
 amortized over a million elements.
 
 This gives the central rule of the design:
 
 \begin{quote}
-\emph{Dispatch is dynamic between kernels and static within them.  A message
-is resolved once per table, never once per object.}
+\emph{Dispatch is dynamic as far as the handler and static inside the kernels
+it launches.  A message is resolved once per table, never once per object.}
 \end{quote}
 
 It is the same rule that LAMMPS and MOOSE follow informally, and it is what
@@ -1191,16 +1216,120 @@ selected by execution device as well as by type.
 \paragraph{Static layer.}  Inside the Rust core and inside Rust packages,
 handlers are generic functions over traits and are monomorphized.  A Rust
 package registers a handler through a generic function that instantiates the
-kernel for its concrete column types and stores the resulting function
+handler and its kernel for its concrete column types and stores the resulting function
 pointer in the dynamic table.  The package author writes static code; the
 registration step is where it becomes dynamically reachable.  Packages in
-other languages do the same thing by hand: they compile a kernel and register
+other languages do the same thing by hand: they compile a handler and register
 its address.
 
 \paragraph{When the type set is closed.}  For messages and types that are all
 known when the program is built, the dynamic table can be bypassed entirely
 and the compiler allowed to resolve the call.  This is an optimization to
 apply where measurement shows it matters, not a second architecture.
+
+\subsection{From a declaration to a call}
+\label{sec:message-life}
+
+\paragraph{What a developer does.}
+
+\begin{enumerate}
+  \item \textbf{Declares the message} in the definition script
+        (Section~\ref{sec:scripts}): its payload, whether it is sent in
+        every cycle (Section~\ref{sec:cycles}), and whether it returns a
+        combined result.
+  \item \textbf{Binds a handler to a type} in the same script, by name.
+  \item \textbf{Writes the handler} in compiled code, with its declaration
+        of the columns it reads and writes and the device it runs on.
+  \item \textbf{Registers it} from the plugin's registration function
+        (Section~\ref{sec:api}).
+\end{enumerate}
+
+When the package is loaded, the core checks the handler's declaration
+against the schema and enters the function pointer in the dispatch table
+under the message, the type and the device.  A driver or a package may
+also attach a handler written in Lua to an event; it is called once for
+each event and never once for each object.  A handler bound to a record
+type is called once for each record (Section~\ref{sec:records}).
+
+\paragraph{What happens when a message is sent.}
+
+\begin{lstlisting}
+an event arrives: a command, a step of the cycle, a message from a package
+  for each table whose type answers the message:            (dynamic, cached)
+    choose the handler registered for the device the table is on
+    bring the columns it reads to that device, if their copies there are stale
+    set the floating-point environment and the logical context
+    call the handler with a batch: a range of rows, their columns,
+        and the attributes of the table
+      the handler launches its kernels over the rows        (static inside)
+      the handler waits for them, and returns a status and any result
+    mark the columns it wrote as current on that device
+  combine the results over tables and ranks; check for errors collectively
+\end{lstlisting}
+
+The choice of handler is made once and kept in the call list of the event,
+so a run in steady state performs no look-ups.  The floating-point
+environment is that of Section~\ref{sec:floating-point}, the logical
+context and the collective check for errors are those of
+Section~\ref{sec:errors}, and a handler applied to part of a table is given
+a range or a list of rows (Section~\ref{sec:mesh}).
+
+\subsection{What is dynamic and what is static}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}L L@{}}
+\toprule
+Decided while the program runs & Decided when code is compiled \\
+\midrule
+Which handler answers a message, for a type and a device & Everything inside a kernel: the loop, the access to fields, the arithmetic \\
+The order of handlers within a cycle & The generic Rust code of the core, specialized for each column type \\
+Handlers written in Lua & C++ templates within a package \\
+Whatever a plugin or a script adds after the program was built & Messages and types that are all known when the program is built, where measurement justifies bypassing the table \\
+\bottomrule
+\end{tabularx}
+\caption{What is resolved dynamically and what statically.}
+\label{tab:static-dynamic}
+\end{table}
+
+Dispatch is dynamic because packages and types arrive while the program
+runs, as plugins and as scripts.  It is affordable because its cost is one
+indirect call for each table, not for each row.
+
+\subsection{Dispatch and devices}
+\label{sec:dispatch-devices}
+
+\begin{itemize}
+  \item \emph{Dispatch always runs on the host.}  Code on a device generally
+        cannot make indirect calls, so there is nothing to dispatch from
+        inside a kernel.
+  \item \emph{The device is part of the key.}  A package may register a
+        handler for the host and another for a GPU, for the same message,
+        and the core chooses by where the table is.
+  \item \emph{The core moves data, not code.}  Before the call it copies
+        whatever columns are stale on the device the handler runs on, and
+        afterward it records which copies are current
+        (Section~\ref{sec:device-memory}).
+  \item \emph{Completion.}  A handler waits for its kernels before it
+        returns.  Returning a completion event instead, so that kernels on
+        independent tables can overlap, is the later contract of
+        Section~\ref{sec:kokkos-needs}.
+\end{itemize}
+
+A kernel on a device therefore does not execute a handler, in either
+sense: it is not one, and it cannot call one or send a message.  What it
+can do is write data that the host acts on once the kernel has finished.
+
+\begin{itemize}
+  \item \emph{To raise an error}, it records the first failing row, and the
+        adapter reports it after the kernel (Section~\ref{sec:errors}).
+  \item \emph{To request something}, it writes a column of flags, such as
+        the cells to be refined, which a later message reads
+        (Section~\ref{sec:mesh-change}).
+  \item \emph{To return a value}, it stores a reduced result, such as a
+        limit on the time step (Section~\ref{sec:mechanism}).
+\end{itemize}
 
 %------------------------------------------------------------------------------
 \section{Hardware portability}
@@ -1288,23 +1417,24 @@ designed so that it does not have to.
         is a few hundred lines per back end and involves no kernel
         compilation, or it can be supplied by a package's own runtime
         (Section~\ref{sec:kokkos-memory}).
-  \item \textbf{Kernels are opaque.}  To the infrastructure a kernel is a
+  \item \textbf{Handlers are opaque.}  To the infrastructure a handler is a
         function pointer with a declaration: which columns it reads and
-        writes, and on which device type it runs.  The infrastructure
-        arranges for the data to be in the right place and calls it.  How the
-        kernel was compiled (C++ with Kokkos, Rust with CubeCL, Fortran with
-        OpenACC, C with CUDA, Julia) is the package's business.
-  \item \textbf{One message may have several kernels.}  The dispatch table is
-        keyed by device as well as by type, so a package can supply a CPU
-        kernel everywhere and GPU kernels where it has them, and the
-        scheduler chooses.
+        writes, and on which device type it runs
+        (Section~\ref{sec:handlers}).  The infrastructure arranges for the
+        data to be in the right place and calls it.  How the kernels it
+        launches were compiled (C++ with Kokkos, Rust with CubeCL, Fortran
+        with OpenACC, C with CUDA, Julia) is the package's business.
+  \item \textbf{One message may have several handlers.}  The dispatch table
+        is keyed by device as well as by type, so a package can supply a
+        handler for the CPU everywhere and handlers for GPUs where it has
+        them, and the scheduler chooses.
 \end{enumerate}
 
 This arrangement satisfies \ref{req:port} in the only way currently open
 without C++: by being portable in its data model and neutral about kernel
-technology.  It also satisfies \ref{req:lang}, since a kernel written in C++
-with Kokkos or in Fortran with OpenACC is registered in the same way as one
-written in Rust.  And
+technology.  It also satisfies \ref{req:lang}, since a handler whose kernels
+are written in C++ with Kokkos or in Fortran with OpenACC is registered in the
+same way as one written in Rust.  And
 it leaves \camshaft{} able to adopt \code{std::offload}, or whatever wins, as an
 additional way to produce kernels, without redesign.
 
@@ -1344,7 +1474,9 @@ following properties.
         it was built against, and the core refuses versions it cannot serve.
         It does so when the plugin is loaded, before anything runs
         (\ref{req:early}).  A plugin also states the floating-point profile
-        it was built to (Section~\ref{sec:floating-point}).
+        it was built to (Section~\ref{sec:floating-point}) and the versions
+        of the packages it was compiled against
+        (Section~\ref{sec:packages}).
 \end{itemize}
 
 The interface should be written in Rust as \code{extern "C"} functions, with
@@ -1421,8 +1553,8 @@ both cases the package exposes one registration function that receives a
 handle to the registry and uses it to define types, messages, handlers and new
 DSL commands.  For a package whose definitions are written as a definition
 script (Section~\ref{sec:scripts}), the registration function supplies that
-script, embedded in the library, and registers the kernels it names; the
-core then checks each kernel's declared columns against the schema.  A package may also register initialization and finalization
+script, embedded in the library, and registers the handlers it names; the
+core then checks each handler's declared columns against the schema.  A package may also register initialization and finalization
 hooks, which the core calls in a defined order relative to MPI and to other
 packages; Section~\ref{sec:kokkos-needs} explains why these are needed.
 Supporting static linking matters on machines where dynamic loading is
@@ -1627,6 +1759,176 @@ under \camshaft{}.  It should be evaluated alongside CubeCL and
 \code{std::offload} in M5.
 
 %------------------------------------------------------------------------------
+\section{Packages and their dependencies}
+\label{sec:packages}
+
+Packages are not independent of one another.  The earlier sections already
+let them depend on each other in three ways: a handler of one package reads
+the columns of another (Section~\ref{sec:scripts}), one package answers a
+message that another defines (Section~\ref{sec:dispatch}), and packages are
+written against a protocol that another implements
+(Section~\ref{sec:mesh-protocol}).  This section makes those dependencies
+explicit.
+
+\subsection{A directed graph without cycles}
+
+A package declares what it requires, in its definition script: the other
+packages it depends on and the external libraries it uses, each with the
+versions it accepts.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- In the definition script of package C.
+cam.requires("A", ">= 2.0")
+cam.requires("B", ">= 1.3")
+\end{lstlisting}
+
+The declarations form a directed graph.  It must have no cycles, and the
+check invocation refuses a set of packages in which it has one.
+Figure~\ref{fig:packages} shows an example.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  pkg/.style={draw, rounded corners=2pt, minimum height=8mm, minimum width=24mm, align=center, font=\small},
+  ext/.style={pkg, dashed},
+  >={Stealth[length=2mm]},
+]
+  \node[pkg, minimum width=80mm, fill=black!6] (core) at (0,0) {\camshaft{}};
+  \node[pkg] (A) at (-2.6,1.6) {Package A};
+  \node[pkg] (B) at (2.6,1.6) {Package B};
+  \node[pkg] (C) at (0,3.2) {Package C};
+  \node[pkg] (D) at (-2.6,4.8) {Package D};
+  \node[pkg] (E) at (2.6,4.8) {Package E};
+  \node[ext] (X) at (6.2,1.6) {Library X};
+  \node[ext] (Y) at (-6.2,4.8) {Library Y};
+  \draw[->] (A) -- (A |- core.north);
+  \draw[->] (B) -- (B |- core.north);
+  \draw[->] (C) -- (A);
+  \draw[->] (C) -- (B);
+  \draw[->] (D) -- (C);
+  \draw[->] (D) -- (A);
+  \draw[->] (E) -- (C);
+  \draw[->, dashed] (B) -- (X);
+  \draw[->, dashed] (D) -- (Y);
+\end{tikzpicture}
+\caption{An example of dependencies between packages.  An arrow points from
+a package to what it depends on.  Dashed boxes are external libraries.  A
+package may have several dependencies, as C and D do, so the structure is a
+graph and not a tree; every package depends on \camshaft{}, directly or
+through others.}
+\label{fig:packages}
+\end{figure}
+
+\subsection{Tiers are left to protocols}
+
+The core knows the graph and nothing else.  It has no notion of tiers and no
+names for the kinds of package that occupy them, because different families
+of packages need different arrangements, and Section~\ref{sec:mesh-protocol}
+already keeps the meaning of data out of the core.
+
+A family of packages agrees its own arrangement through \emph{protocols}.
+Any package may publish one: a written statement of the tables, fields and
+messages it provides, as the mesh protocol is.  A package then depends on a
+protocol and not on a particular implementation of it, so that any package
+which implements the protocol may be loaded in its place.
+
+\subsection{What the graph determines}
+
+\begin{itemize}
+  \item \emph{Order.}  Packages are loaded, initialized and finalized in an
+        order consistent with the graph (Section~\ref{sec:build}), and the
+        default order of their handlers within a cycle follows it too
+        (Section~\ref{sec:cycles}).
+  \item \emph{Consistency before the run.}  The check invocation verifies
+        that every requirement can be met by the set of packages a driver
+        loads.  A plugin records the version of each dependency it was
+        compiled against, and a mismatch is refused when the plugin is
+        loaded (Section~\ref{sec:validation}).
+  \item \emph{External libraries.}  Declaring them lets the core detect two
+        packages that need incompatible versions of one library in one
+        process, which the rule of one of each runtime forbids
+        (Section~\ref{sec:build}), and lets output record what was used.  A
+        library that keeps global state is initialized once, by the package
+        or binding that owns it, as Kokkos is by its adapter
+        (Section~\ref{sec:kokkos-needs}).
+  \item \emph{Build and distribution.}  The same edges appear in each
+        package's CMake configuration and in its Spack recipe
+        (Section~\ref{sec:build}).
+\end{itemize}
+
+\paragraph{Mutual influence without a cycle.}  Two packages often need to
+affect each other.  That does not require a cycle.  If A and C each act on
+the other, A declares a message and C answers it.  C then depends on A, and
+A depends on nothing above it: A sends its message without knowing who, if
+anyone, will answer.
+
+\subsection{Composition between packages}
+\label{sec:composition}
+
+Section~\ref{sec:dispatch-devices} established that a kernel cannot call a
+handler.  A kernel of one package nevertheless often needs, for every
+element, something that another package computes.  The graph gives the rule
+for how it may get it.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{40mm} L L@{}}
+\toprule
+Direction & Means allowed & Why \\
+\midrule
+Downward, along a declared dependency & Composition at compile time: the dependent package includes inline functions that its dependency installs, and calls them inside its own kernels & The dependency is declared, its version is recorded and checked, and the call is static, so it works inside a kernel on a device \\
+Upward or sideways, where no dependency is declared & Messages at the granularity of a table, or data: columns and look-up tables & The packages remain substitutable for one another and neutral as to language \\
+\bottomrule
+\end{tabularx}
+\caption{How one package may use another.}
+\label{tab:composition}
+\end{table}
+
+\paragraph{Downward.}  In Figure~\ref{fig:packages}, a kernel of C may call
+an inline function of A for every element.  The call is resolved when C is
+compiled and lies wholly outside dispatch.  Three conditions apply.  The
+dependency must be declared.  The version that C was compiled against is
+recorded in C's plugin and checked when it is loaded.  And the two are built
+together, against the same Kokkos; the code that is inlined takes the
+floating-point profile of the package that includes it
+(Section~\ref{sec:floating-point}).  A package that offers itself for
+composition installs its headers and a CMake package configuration, as
+\camshaft{} itself does.
+
+\paragraph{Upward or sideways.}  A package that needs something from a
+package above it, or from a peer, has two means.  The first is a pair of
+messages at the granularity of a table: its handler writes inputs to
+columns, the other package's handler fills the outputs, and its next
+handler continues.  The second is data: columns the other package
+maintains, or a look-up table generated from records or imported from a
+dataset (Sections~\ref{sec:records} and~\ref{sec:datasets}), read inside the
+kernel.
+
+\paragraph{The cost of the downward means.}  It is in practice confined to
+C++, since inline functions and templates do not cross languages
+(Section~\ref{sec:prior}); a package in another language uses messages or
+data.  And a change low in the graph forces every package above it to be
+rebuilt.  The rule accepts those costs only along edges that a package has
+chosen to declare.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item Definition scripts declare requirements on packages and on external
+        libraries, with versions.
+  \item The core holds the graph, refuses a cycle, and orders loading,
+        initialization and handlers by it.
+  \item A plugin records the versions of its dependencies, and the core
+        checks them at load.
+  \item Any package may publish a protocol, and a package may depend on a
+        protocol in place of an implementation.
+  \item Composition at compile time is permitted along declared
+        dependencies only; everything else passes through messages or
+        data.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
 \section{Process and build model}
 \label{sec:build}
 
@@ -1684,7 +1986,8 @@ depend on one another.  The library should enforce this sequence:
   \item select devices and run the initialization hooks of language bindings
         (the Kokkos adapter initializes Kokkos here, on the selected device);
   \item load packages and run their registration functions and
-        initialization hooks, in dependency order;
+        initialization hooks, in the order of their dependencies
+        (Section~\ref{sec:packages});
   \item run the interpreter loop;
   \item run finalization hooks in reverse order, then finalize the bindings,
         then MPI, unless the host owns it.
@@ -2153,7 +2456,7 @@ width.
 A mesh of tetrahedra and hexahedra is naturally two tables, since the two
 have different node counts and need different kernels.  Per-table dispatch
 (Section~\ref{sec:dispatch}) then does the right thing without further
-design: the message \enquote{assemble} resolves to one kernel for the
+design: the message \enquote{assemble} resolves to one handler for the
 tetrahedron table and another for the hexahedron table.
 
 The difficulty is on the other side of the relation.  A face must be able to
@@ -2239,7 +2542,7 @@ should be a standard sequence of messages:
         \emph{transfer map} relating new rows to old ones;
   \item \emph{transfer}: each field is carried across the transfer map by a
         handler chosen by the field's declared transfer rule (inject,
-        interpolate, conserve, a package-supplied kernel, or, for an
+        interpolate, conserve, one that a package supplies, or, for an
         analytic field, evaluation afresh as in
         Section~\ref{sec:expressions});
   \item \emph{rebalance}: rows are repartitioned and migrated;
@@ -2326,7 +2629,8 @@ kind exposes, by what names, with what meaning, and which messages a mesh
 package must answer (the sequence of Section~\ref{sec:mesh-change}, ghost
 filling, geometric queries, the projection of expressions onto its tables as
 in Section~\ref{sec:expressions}).  Physics packages are written against the
-protocol; mesh packages implement it.
+protocol; mesh packages implement it.  Section~\ref{sec:packages} makes
+protocols available to any package.
 
 The protocol should be specified alongside the infrastructure but stay out of
 the core, which should know about relations, index spaces and versions and
@@ -2474,8 +2778,8 @@ bit for bit, and tests that compare the two must allow for it.
 
 \subsection{To a kernel, a column}
 
-A kernel is opaque compiled code that reads columns
-(Section~\ref{sec:gpu}), so an analytic field reaches it as a column.  The
+A kernel is compiled code that reads columns and nothing else
+(Section~\ref{sec:handlers}), so an analytic field reaches it as a column.  The
 expression is evaluated into the column under a \emph{refresh policy}:
 once, for an initial condition; in every cycle, for a field that depends on
 time; or whenever the table changes.  The version counters of
@@ -2567,7 +2871,7 @@ order.
         density and field profiles, evaluates expressions supplied at run
         time on GPUs from several vendors~\cite{amrexparser,warpxparams}.
   \item \textbf{Generated kernels.}  The check invocation, or a preparation
-        step like it, can write a kernel for each expression in a driver
+        step like it, can write a handler and its kernel for each expression in a driver
         and compile it into a small plugin before the run is submitted.
         This is the fastest route and can wait until measurement shows that
         the second is too slow.
@@ -2634,7 +2938,7 @@ since there is no formula to record.
 A user for whom neither an expression nor this fill will do can compute the
 values elsewhere and import them, from a database file
 (Section~\ref{sec:interchange}) or with Python as the host
-(Section~\ref{sec:build}), or can supply a compiled kernel in a package.
+(Section~\ref{sec:build}), or can supply a compiled handler in a package.
 
 \subsection{Consequences for the design}
 
@@ -2698,7 +3002,7 @@ a \emph{persistence class}, which its owner declares.
         The default.  The field is written to every checkpoint.
   \item[Derived.]
         The field is not written.  It declares how it is rebuilt: by an
-        expression, or by a kernel that a package supplies.
+        expression, or by a handler that a package supplies.
   \item[Scratch.]
         The field is not written and has no meaning from one cycle to the
         next.  At a restart it is filled with values that are not numbers,
@@ -3088,11 +3392,11 @@ They are gathered here because they are one policy.
 Stage & What is checked & What it needs \\
 \midrule
 Compilation & In the core, memory errors and data races, by the Rust compiler.  In packages, the names and types of fields, through the header generated from the definitions (Section~\ref{sec:scripts}) & Compilers only \\
-Definition check & Names; namespaces and ownership; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
+Definition check & Names; namespaces and ownership; that the dependencies between packages form no cycle and their version requirements can be met; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
-Loading a package & Each kernel's declared columns, with their types and units, against the schema; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
+Loading a package & Each handler's declared columns, with their types and units, against the schema; the versions of the packages it was compiled against; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
 Driver check & The arguments of every command; references to tables, records and names; that files exist; that every dataset is found and passes its package's probe; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
-Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built; that datasets can be read from the compute nodes; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
+Pre-flight & That every record is complete; that every message which will be sent has a handler for the device each of its tables is on; that exchange plans can be built; that datasets can be read from the compute nodes; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
 During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
 \bottomrule
 \end{tabularx}
@@ -3171,7 +3475,7 @@ names a unit explicitly.  Three rules govern what a driver may write.
 
 Conversion happens in the control plane, where a value enters a record.
 Columns are stored in their units and nothing is converted inside a kernel.
-Between packages the same principle is applied one stage earlier: a kernel
+Between packages the same principle is applied one stage earlier: a handler
 declares the unit it expects of a column, the binding check compares it
 with the column's unit when the package is loaded, and a mismatch is an
 error then.  A value given in a unit that belongs to another system of
@@ -3257,8 +3561,8 @@ script without executing its run commands~\cite{lammpsskiprun}.
 Some things cannot be known until the real run has loaded its data: which
 tables exist on which devices, how the mesh is partitioned.  Before the
 first cycle of every \code{run} the core checks everything that those
-facts settle (Table~\ref{tab:stages}).  A handler that has no kernel for
-the device its table is on is then reported before cycle~0, and not at the
+facts settle (Table~\ref{tab:stages}).  A message that has no handler for
+the device a table is on is then reported before cycle~0, and not at the
 cycle on which its message is first sent.
 
 \subsection{What cannot be checked early}
@@ -3292,7 +3596,7 @@ cycle on which its message is first sent.
   \item A schema compatibility check compares a package's description with
         that of its last release.
   \item \code{run} makes pre-flight checks before its first cycle.
-  \item A kernel may declare the unit it expects of a column, and the
+  \item A handler may declare the unit it expects of a column, and the
         binding check compares units as well as types.
 \end{enumerate}
 
@@ -3337,7 +3641,7 @@ In order of usefulness:
 
 \begin{enumerate}
   \item \textbf{The logical context.}  The dispatcher always knows the
-        cycle, the rank, the command, the message, the package, the kernel,
+        cycle, the rank, the command, the message, the package, the handler,
         the table and the device.  Keeping it costs nothing measurable,
         since it changes once per table and not once per element; it is
         available in a release build; and it answers most questions.
@@ -3387,7 +3691,7 @@ like this.
 
 \begin{lstlisting}
 error[pusher.negative-energy] at cycle 5234, on 3 of 4096 ranks
-  kernel   boris (package pusher), answering pusher.advance
+  handler  boris (package pusher), answering pusher.advance
   table    electrons, on device cuda:0; first row: global id 918273645
   script   run.lua:21, in cam.run
   A particle's kinetic energy became negative.  Reduce pusher.cfl.
@@ -3434,7 +3738,7 @@ restartable, for examination afterward.  Such a file can be very large,
 so it is written only when the driver asks for it.
 
 \paragraph{Deferred: retrying a cycle.}  The core knows which columns each
-kernel writes.  It could therefore save them at the start of a cycle and,
+handler writes.  It could therefore save them at the start of a cycle and,
 when a package rejects the cycle, restore them and try again with a smaller
 time step, without any code in the package.  That is a real capability for
 stiff problems.  It doubles the memory held for state fields, and it is
@@ -3501,7 +3805,7 @@ because it is the one case in which a native backtrace points at the cause
   \item \emph{Rust.}  The Rust compiler assumes the default floating-point
         environment, and altering it while Rust code runs is undefined
         behavior~\cite{rustfenv}.  Traps can be enabled only around calls
-        into the kernels of packages, and never in the core.
+        into the handlers of packages, and never in the core.
   \item \emph{Vectorized code.}  A lane that is masked or computed
         speculatively can raise a trap that the scalar code would not, so
         trapping belongs to the strict profile alone.
@@ -3512,10 +3816,10 @@ Two complements cover what trapping cannot.
 
 \begin{itemize}
   \item \emph{Checking the exception flags after each handler.}  This is
-        cheap, it works only on the host, and it names the kernel.
-  \item \emph{Scanning the columns a kernel wrote for values that are not
+        cheap, it works only on the host, and it names the handler.
+  \item \emph{Scanning the columns a handler wrote for values that are not
         finite.}  This works on a device, and it uses the declarations of
-        what each kernel writes that the core already has
+        what each handler writes that the core already has
         (Section~\ref{sec:device-memory}).  A build to the fast profile, in
         which the compiler may have removed a package's own tests for such
         values, depends on it.
@@ -3592,6 +3896,14 @@ remedy is the one already applied to signal handlers
         which evaluates at points, and the package, which decides what
         points and how to project, has not been tested against a real
         discretization.
+  \item \textbf{Composition between packages.}  Section~\ref{sec:packages}
+        lets a package compose at compile time with the packages it depends
+        on.  That brings back, along those edges, the coupling through C++
+        templates that Section~\ref{sec:prior} counted against other
+        frameworks: it is closed to other languages, and a change low in the
+        graph forces everything above it to be rebuilt.  The rule confines
+        the coupling to declared dependencies, but how much of a real set of
+        packages ends up coupled in this way is not known.
   \item \textbf{Datasets and containers.}  Two things in
         Sections~\ref{sec:datasets} and~\ref{sec:containers} depend on
         others.  Keeping one copy of a large table for each node, shared
@@ -3772,17 +4084,20 @@ through every milestone from M1.
         unmanaged views over columns with explicit layout, exception
         wrapping, and the CMake package configuration.  The package's
         definitions come from a definition script embedded in the plugin; a
-        typed header is generated from it; a kernel whose declared columns
+        typed header is generated from it; a handler whose declared columns
         do not match the schema is refused at load.  The generated header
         carries the documentation comments of the Rust source, and the
         reference for the C interface and the adapter is built from it.
         A package kernel that names a field wrongly fails to compile against
-        the generated header; a kernel that expects another unit is refused
+        the generated header; a handler that expects another unit is refused
         at load; a definition changed without a new schema version fails the
-        compatibility check.  Unit tests of each kernel as test scripts,
+        compatibility check.  Unit tests of each handler as test scripts,
         registered with CTest; dispatch coverage; the address and
         undefined-behavior sanitizers on a build instrumented in every
-        language.  Errors declared in a definition script and raised from
+        language.  Two packages of which one depends on the other
+        (Section~\ref{sec:packages}): composition at compile time along the
+        dependency, a message in the other direction, and a mismatch of
+        versions refused at load.  Errors declared in a definition script and raised from
         C++ and Fortran; the three floating-point profiles in the installed
         CMake configuration, the environment set and restored around each
         handler, traps in the strict profile, and the profile variant of
@@ -3918,7 +4233,7 @@ do is decided by how it is loaded.
 \end{itemize}
 
 \begin{lstlisting}[language={[5.3]Lua}]
--- tests/advance.lua: a unit test of one kernel, on every device.
+-- tests/advance.lua: a unit test of one handler, on every device.
 test.matrix{ ranks = {1, 4}, devices = {"host", "cuda"}, tier = 1 }
 
 local pusher = cam.use("pusher")
@@ -3940,7 +4255,7 @@ test.expect_error("unknown-argument", function() cam.run{ untill_time = 1.0 } en
 The names are placeholders, as in Section~\ref{sec:sketch}.  The test fills
 a small table from expressions (Section~\ref{sec:expressions}), sends one
 message, and compares the result with an exact expression.  A package's
-kernel is tested this way without any scaffolding in C++, and the same
+handler is tested this way without any scaffolding in C++, and the same
 script tests it on every device.
 
 \paragraph{One orchestrator.}  A single command runs everything, and it is
@@ -3981,7 +4296,7 @@ anything more being written.
 Kind & How & Limits \\
 \midrule
 Unit tests of the core & Ordinary Rust tests, run by cargo-nextest~\cite{nextest}; property tests of the store~\cite{proptest} & These stay in Rust and are not routed through scripts.  nextest does not run documentation tests, which are run separately \\
-Unit tests of package kernels & A test script, as above & None beyond the devices available \\
+Unit tests of package handlers & A test script, as above & None beyond the devices available \\
 Regression & A generic comparison of database files; snapshots of generated headers, descriptions and error messages; and the checks already described: binary interface, schema compatibility, instruction counts & Baselines need a policy for storage \\
 Coverage & cargo-llvm-cov~\cite{cargollvmcov} for Rust and for C and C++ built with a matching Clang; dispatch coverage; coverage of errors & Fortran, and code built with GCC, need a separate tool \\
 Address and undefined-behavior sanitizers & Rust, the vendored Lua, the Kokkos adapter and the example packages, all built instrumented & Needs nightly Rust; does not reach code on a GPU \\
@@ -4018,9 +4333,9 @@ terms are worth more.
 
 \begin{itemize}
   \item \emph{Dispatch coverage.}  The registry holds every entry of the
-        dispatch table: every kernel, for every type and every device
+        dispatch table: every handler, for every type and every device
         (Section~\ref{sec:dispatch}).  The harness reports the entries that
-        no test called.  For the kernels a package ships, this one is a
+        no test called.  For the handlers a package ships, this one is a
         gate.
   \item \emph{Coverage of errors.}  Every error of validation has an
         identifier (Section~\ref{sec:strict}), and a test that expects a
@@ -4094,7 +4409,7 @@ Section~\ref{sec:floating-point} to produce the reference, then under the
 release and fast profiles, and the results are compared within the
 tolerances the fields declare.  A package that chooses the fast profile
 must pass.  Tests on the host are run under the strict profile with traps
-enabled around kernels, so that an invalid operation stops the test where
+enabled around handlers, so that an invalid operation stops the test where
 it occurs.
 
 Two cautions apply.  The fast profile may remove a package's own tests for
@@ -4271,7 +4586,7 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit and property tests on Linux (both architectures) and macOS; the test scripts on the host, with their check, restart and rank variants, under the strict floating-point profile with traps enabled around kernels; dispatch coverage and coverage of errors; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
+1 & Hosted; every push and pull request & Formatting and lints; unit and property tests on Linux (both architectures) and macOS; the test scripts on the host, with their check, restart and rank variants, under the strict floating-point profile with traps enabled around handlers; dispatch coverage and coverage of errors; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
 2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; the test scripts under the address and undefined-behavior sanitizers; the memory sanitizer on the core alone; fuzzing for a bounded time; line coverage; the release and fast profiles against the strict one; ensemble tests of small problems; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
 3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; the device variants of the test scripts; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
 4 & A cluster; per campaign & Ensemble tests of large problems; vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
@@ -4376,7 +4691,7 @@ things follow.
 
 \begin{itemize}
   \item \emph{The developer writes only prose.}  A field's type, shape, unit
-        and default, the messages a type answers and the columns a kernel
+        and default, the messages a type answers and the columns a handler
         reads and writes are already in the schema, and are generated.
   \item \emph{Missing documentation can be detected.}  The check invocation
         of Section~\ref{sec:scripts} reports a package whose public fields,
@@ -4520,14 +4835,15 @@ User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined t
 Scripts & Definition scripts owned by packages and driver scripts owned by users, separated by role and privilege, not by modes; the definition script is the single source of truth and can be evaluated offline; bindings checked at load; ownership by namespace, with fields added but never altered by others \\
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
 Configuration objects & Records: same schema as bulk types, stored on the host and replicated on every rank; fixed-width fields reach kernels by value or through generated look-up tables; tables carry a record of attributes \\
-Dispatch & Dynamic per table through a (message, type, device) table; static within kernels \\
+Dispatch & Dynamic per table through a (message, type, device) table, as far as the handler, which is a host function; static within the kernels a handler launches; a kernel on a device neither is a handler nor calls one \\
 Run loop & A cycle counter owned by the core as the primary measure of progress; simulation time as an optional clock; the time step chosen each cycle as the minimum of the packages' proposals; several stop conditions, absolute and relative, with the one that fired returned to the driver \\
-GPU strategy & The infrastructure owns memory and scheduling; kernels are opaque and may come from any toolchain \\
+GPU strategy & The infrastructure owns memory and scheduling; handlers are opaque and their kernels may come from any toolchain \\
 Meshes & Tables plus declared relations (fixed and offsets-and-indices), index spaces across element types, table versions and transfer maps for adaptation, one ghost-to-owner communication primitive; mesh semantics in a separate protocol, not in the core \\
 Physics packages & Expected in C++ with Kokkos; served by an optional adapter (unmanaged views, life-cycle hooks, Kokkos-backed allocator) outside the core \\
 Data exchange & Arrow C data and device interfaces; DLPack \\
 Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the MPI~5.0 ABI later \\
 Plugins & One registration entry point; static or dynamic linking \\
+Packages & Dependencies on other packages and on external libraries are declared and form a directed graph without cycles; the core knows the graph and nothing of tiers, which a family of packages agrees through protocols; a package may compose at compile time with the packages it depends on, and reaches all others through messages at the granularity of a table, or through data \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
 External datasets & Declared in definition scripts and found through a search path; checked by the check invocation and again in the pre-flight; read once and imported into the store as replicated tables with units and device copies; never written to checkpoints, which record only name, version and hash \\
