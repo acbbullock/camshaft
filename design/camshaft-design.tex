@@ -510,7 +510,8 @@ loading of a package and a check made before the run.
         the type and the field.  With a header generated under rule~2, the
         Kokkos adapter's accessors can be typed at compile time as well, and
         the look-ups by name in the sketch of Section~\ref{sec:kokkos}
-        disappear.
+        disappear.  Section~\ref{sec:type-checking} sets out the whole
+        argument for checking types across languages.
   \item \textbf{Ownership rules replace a schema freeze.}  Every type belongs
         to a namespace, owned by whoever defined it.  New types may be
         defined at any time, including by a driver in its own namespace.  A
@@ -1561,6 +1562,102 @@ Supporting static linking matters on machines where dynamic loading is
 restricted or slow, which includes some of the largest ones.
 Section~\ref{sec:build} describes how each configuration is linked and how
 the process is started.
+
+\subsection{Type checking across languages}
+\label{sec:type-checking}
+
+A C interface erases types.  To the linker a handler is an address and a
+column is a buffer, and no compiler sees both sides of the boundary.  Types
+cannot cross it, but descriptions of types can, as plain data, and the
+schema is such a description.  Checking is therefore done in stages
+(Table~\ref{tab:type-checking}): each language's compiler checks its own
+side against a description generated from the schema, and the core checks,
+when a package is loaded, that the description is still true.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{34mm} L >{\raggedright\arraybackslash}p{36mm}@{}}
+\toprule
+When & What is checked & By whom \\
+\midrule
+Compiling a package & The handler's code, against a typed header generated from the package's definition script & The package's own compiler \\
+Loading a package & That the header was generated from the definitions now loaded; the handler's declaration against the schema; the interface version & The core \\
+Each call & Nothing & \\
+\bottomrule
+\end{tabularx}
+\caption{Stages of type checking across the language boundary.}
+\label{tab:type-checking}
+\end{table}
+
+\paragraph{When a package is compiled.}  A definition script can be
+evaluated offline, so a tool can turn it into a typed header for C++ and a
+module for Fortran (Section~\ref{sec:scripts}).  A handler then obtains a
+field through a generated accessor and not through a string.
+
+\begin{itemize}
+  \item \emph{C++.}  The accessor returns a Kokkos view of exactly the
+        element type and shape of the field.  A misspelled field, or a
+        wrong type, does not compile.
+  \item \emph{Fortran.}  The generated module returns pointers of the right
+        type, kind and rank, which the Fortran compiler checks.
+  \item \emph{Rust.}  The generic interface is checked by the Rust compiler
+        directly (Section~\ref{sec:mechanism}).
+  \item \emph{Access.}  A column that the handler declared it only reads
+        arrives as a view of constant elements, so that writing to it does
+        not compile.
+\end{itemize}
+
+\paragraph{When a package is loaded.}  Checking at compile time proves only
+that the code agrees with the header.  Two checks at load complete the
+argument.
+
+\begin{enumerate}
+  \item \textbf{The hash.}  A plugin records a hash of the definition script
+        it was built from.  The core compares it with the definitions that
+        are loaded and refuses a plugin whose hash differs, so that a header
+        which has gone out of date cannot pass.
+  \item \textbf{The declaration.}  Each handler is registered with a
+        declaration, as plain data: every column it reads and writes, with
+        its element type, shape, unit and device
+        (Section~\ref{sec:handlers}).  The core compares the declaration
+        with the schema and resolves the names to column handles, once.  A
+        mismatch is an error that names the package, the type and the
+        field.
+\end{enumerate}
+
+The interface version is checked at the same moment, and structures passed
+across the boundary carry their own size as their first field, so that a
+newer core can serve an older plugin.  The header is a snapshot of the
+schema and the hash is the proof that the snapshot is current.  Together
+they give the effect of checking the whole program without a compiler that
+sees the whole program, and because the checks are made at load, a call
+costs nothing: by the time a handler runs, every name is a resolved
+handle.
+
+\paragraph{Without a generated header.}  A handler may instead look fields
+up by name, as the sketch of Section~\ref{sec:kokkos} does.  The adapter
+then checks the type the handler asked for against the type of the column,
+once in each call.  That is a check for each table and not for each row,
+and it finds at the first call what the generated header would have found
+at compile time.  Plain C has no templates, and uses either generated
+inline accessors or accessor functions for each element type, which fail
+on a mismatch.
+
+\paragraph{What this cannot catch.}
+
+\begin{itemize}
+  \item \emph{A handler that does not keep to its declaration.}  In C
+        nothing prevents a handler from declaring a column of 64-bit
+        floating-point numbers and then treating the buffer as something
+        else.  The defenses are the unit test of each handler and the
+        variant of the test scripts that runs under the address sanitizer
+        (Section~\ref{sec:harness}).
+  \item \emph{Dynamic languages.}  Python and Julia have no stage of
+        compilation.  They receive columns through the Arrow and DLPack
+        interfaces (Section~\ref{sec:schema}), which carry the element
+        type, and are checked when the array is used.
+\end{itemize}
 
 %------------------------------------------------------------------------------
 \section{C++ and Kokkos physics packages}
@@ -4097,7 +4194,9 @@ through every milestone from M1.
         language.  Two packages of which one depends on the other
         (Section~\ref{sec:packages}): composition at compile time along the
         dependency, a message in the other direction, and a mismatch of
-        versions refused at load.  Errors declared in a definition script and raised from
+        versions refused at load.  A plugin built from a definition script
+        that has since changed is refused by its hash
+        (Section~\ref{sec:type-checking}).  Errors declared in a definition script and raised from
         C++ and Fortran; the three floating-point profiles in the installed
         CMake configuration, the environment set and restored around each
         handler, traps in the strict profile, and the profile variant of
@@ -4831,6 +4930,7 @@ Question & Recommendation \\
 \endfoot
 Core language & Rust, on the stable compiler \\
 Interface language & C ABI, header generated from the Rust source \\
+Type checking across languages & Each package's compiler checks its handlers against a typed header generated from the definition script; at load the core checks, by a hash, that the header is current, and checks each handler's declaration against the schema; a call checks nothing \\
 User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined to the control plane \\
 Scripts & Definition scripts owned by packages and driver scripts owned by users, separated by role and privilege, not by modes; the definition script is the single source of truth and can be evaluated offline; bindings checked at load; ownership by namespace, with fields added but never altered by others \\
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
