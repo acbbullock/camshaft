@@ -16,6 +16,10 @@
 \usepackage{csquotes}
 \usepackage[backend=biber,style=numeric,sorting=none,maxbibnames=5]{biblatex}
 \addbibresource{references.bib}
+% Let long URLs in the bibliography break after digits and letters.
+\setcounter{biburlnumpenalty}{9000}
+\setcounter{biburllcpenalty}{7000}
+\setcounter{biburlucpenalty}{8000}
 \usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
 
 \newcommand{\camshaft}{\textsc{camshaft}}
@@ -504,11 +508,11 @@ loading of a package and a check made before the run.
         through the package's own commands (Section~\ref{sec:modification}).
   \item \textbf{Modes belong to the invocation, not to the script.}  The
         executable, and the library entry points beneath it
-        (Section~\ref{sec:build}), offer at least four: run a driver; check
+        (Section~\ref{sec:build}), offer at least five: run a driver; check
         it, which evaluates the definitions and the driver and validates
         every command without executing any; describe a package, which
-        prints its types, fields, parameters and messages; and generate
-        headers.
+        prints its types, fields, parameters and messages; generate
+        headers; and run test scripts (Section~\ref{sec:harness}).
 \end{enumerate}
 
 \subsection{What the DSL might look like}
@@ -723,6 +727,8 @@ package through the API.  For each type the registry should record:
         change after a run has started;
   \item for the type, whether a driver may create and delete its rows
         directly (Section~\ref{sec:modification});
+  \item for each field, the tolerance within which two values of it are
+        taken to agree when files are compared (Section~\ref{sec:harness});
   \item a schema version, so that old checkpoints can be migrated.
 \end{itemize}
 
@@ -1869,6 +1875,8 @@ camshaft/
     fortran/            CMake; interface module source
     python/  julia/     packages in their own ecosystems
   examples/             one small package per language
+  tests/                test scripts and baseline summaries
+  xtask/                the test orchestrator, a Rust program
   docs/                 portal and narrative documentation (mdBook)
   research/             this report
 \end{lstlisting}
@@ -3001,7 +3009,9 @@ close each of them.
   \item \emph{Errors point at the user's line.}  A report names the file and
         line of the call in the user's script, the command and the argument,
         what was expected and what was given, the nearest valid name, and
-        the argument's own documentation.
+        the argument's own documentation.  Every kind of error has a stable
+        identifier, which tests that expect a rejection name
+        (Section~\ref{sec:harness}).
 \end{itemize}
 
 \begin{lstlisting}
@@ -3133,6 +3143,14 @@ cycle on which its message is first sent.
         which evaluates at points, and the package, which decides what
         points and how to project, has not been tested against a real
         discretization.
+  \item \textbf{Testing tools that are not settled.}  Sanitizer support in
+        Rust is unstable, so the instrumented builds of
+        Section~\ref{sec:sanitizers} depend on the nightly compiler and may
+        break with it.  The memory sanitizer covers the core alone, which
+        leaves reads of uninitialized memory in packages to Valgrind, a
+        slower and less precise tool.  And baselines kept outside the
+        repository need somewhere durable to live, which has not been
+        chosen.
   \item \textbf{Restart by replay.}  Section~\ref{sec:replay} restarts a
         run by executing its driver again against a journal.  That depends
         on three things that are untried.  Every command must be classed
@@ -3210,7 +3228,9 @@ through every milestone from M1.
         pkg-config and CMake files; and a CMake project for the Kokkos
         adapter and a C++ demonstration package that builds against the
         installed library.  The documentation portal and the rustdoc build of
-        Section~\ref{sec:docs}, with their lints.  Tier~1 of the continuous
+        Section~\ref{sec:docs}, with their lints.  The test orchestrator of
+        Section~\ref{sec:harness}, running the Rust tests and collecting
+        coverage.  Tier~1 of the continuous
         integration described in Section~\ref{sec:ci}, on stable Rust, with Kokkos built for its
         serial and OpenMP back ends in a prebuilt container image; the
         local script for tier~3.
@@ -3223,7 +3243,10 @@ through every milestone from M1.
         persistence classes; tables with aligned columns; records and table
         attributes; a database file written and read on one process,
         carrying its schema, with the matching rules of
-        Section~\ref{sec:file-schema}, and an empty file as a template; a
+        Section~\ref{sec:file-schema}, and an empty file as a template; the
+        comparison of two database files within declared tolerances;
+        property tests of the store, the memory sanitizer on the core, and
+        fuzzing of the file reader and the validator; a
         look-up
         table generated from records; creation and deletion of rows; Arrow C
         data interface export and import.
@@ -3262,7 +3285,10 @@ through every milestone from M1.
         with units (Section~\ref{sec:validation}).  Symbolic expressions
         built directly and by tracing; their dimensional analysis; the host
         evaluator; analytic fields with refresh policies; the fill on the
-        host (Section~\ref{sec:expressions}).
+        host (Section~\ref{sec:expressions}).  The test invocation and its
+        test module; the check variant derived from each script; tests that
+        expect a rejection, and coverage of errors
+        (Section~\ref{sec:harness}).
         \emph{Measure:} time spent in Lua per cycle for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
@@ -3280,7 +3306,10 @@ through every milestone from M1.
         A package kernel that names a field wrongly fails to compile against
         the generated header; a kernel that expects another unit is refused
         at load; a definition changed without a new schema version fails the
-        compatibility check.
+        compatibility check.  Unit tests of each kernel as test scripts,
+        registered with CTest; dispatch coverage; the address and
+        undefined-behavior sanitizers on a build instrumented in every
+        language.
         \emph{Measure:} that the four perform identically when compared like
         with like (single-threaded against Kokkos serial, threaded against
         Kokkos OpenMP), which confirms that the interface adds no cost.
@@ -3378,6 +3407,174 @@ GitHub, which determines the resources available.
         hard cases discussed below.
 \end{itemize}
 
+Sections~\ref{sec:harness} to~\ref{sec:fuzzing} say how these are tested.
+The sections after them say where.
+
+\subsection{A script-driven test harness}
+\label{sec:harness}
+
+A test is a script.  It is loaded in the driver role
+(Section~\ref{sec:scripts}) with one addition, a test module that supplies
+assertions, comparisons within a tolerance, and a way to state that a
+command must be rejected.  Test scripts are run by the test invocation.
+This is the principle of Section~\ref{sec:scripts} again: what a script may
+do is decided by how it is loaded.
+
+\begin{itemize}
+  \item \emph{Each test runs in a process of its own}, because MPI and
+        Kokkos can each be initialized only once in a process.
+  \item \emph{A test declares its matrix}: the numbers of ranks, the
+        devices, the numbers of threads, and the tier of
+        Section~\ref{sec:tiers} it belongs to.
+  \item \emph{Results are reported in the JUnit format}, which continuous
+        integration services read.
+\end{itemize}
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- tests/advance.lua: a unit test of one kernel, on every device.
+test.matrix{ ranks = {1, 4}, devices = {"host", "cuda"}, tier = 1 }
+
+local pusher = cam.use("pusher")
+local p = pusher.Particle:table("probe", { name = "probe", charge = 0.0, mass = 1.0 })
+p:create(1000)
+
+local i = cam.row()                              -- the row index, as an expression
+p:set("position", cam.vec(i, 0.0, 0.0))
+p:set("velocity", cam.vec(1.0, 2.0, 0.0))
+
+test.clock{ dt = 0.5 }
+cam.send("pusher.advance", p)                    -- one message to one table
+test.expect_close(p, "position", cam.vec(i + 0.5, 1.0, 0.0), { rel = 1.0e-14 })
+
+-- A test that a mistake is rejected, by the identifier of the error.
+test.expect_error("unknown-argument", function() cam.run{ untill_time = 1.0 } end)
+\end{lstlisting}
+
+The names are placeholders, as in Section~\ref{sec:sketch}.  The test fills
+a small table from expressions (Section~\ref{sec:expressions}), sends one
+message, and compares the result with an exact expression.  A package's
+kernel is tested this way without any scaffolding in C++, and the same
+script tests it on every device.
+
+\paragraph{One orchestrator.}  A single command runs everything, and it is
+the same command on a developer's machine and in continuous integration.
+It runs the Rust tests, the tests of the bindings through CMake and CTest,
+and the test scripts; it builds the instrumented variants described below;
+and it merges results and coverage.  It is written in Rust, as a tool in the
+workspace, so that running the tests needs nothing beyond the toolchain the
+core already requires.  Python would be more familiar and would add a
+dependency to every test run.  A CMake function lets a package register its
+test scripts with CTest, which is where the developers of Kokkos packages
+expect to find them.
+
+\paragraph{One script, many tests.}  Because the infrastructure controls how
+a script is run, the harness derives further tests from each script without
+anything more being written.
+
+\begin{itemize}
+  \item \emph{Check}: the script must pass the check invocation
+        (Section~\ref{sec:validation}).
+  \item \emph{Restart}: the restart test of Section~\ref{sec:replay}, with
+        the checkpoint placed halfway.
+  \item \emph{Ranks}: one rank against several, within tolerance.
+  \item \emph{Device}: the host against a device, within tolerance.
+  \item \emph{Sanitizer}: the same script under the instrumented builds of
+        Section~\ref{sec:sanitizers}.
+\end{itemize}
+
+\subsection{Kinds of testing}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{30mm} L L@{}}
+\toprule
+Kind & How & Limits \\
+\midrule
+Unit tests of the core & Ordinary Rust tests, run by cargo-nextest~\cite{nextest}; property tests of the store~\cite{proptest} & These stay in Rust and are not routed through scripts.  nextest does not run documentation tests, which are run separately \\
+Unit tests of package kernels & A test script, as above & None beyond the devices available \\
+Regression & A generic comparison of database files; snapshots of generated headers, descriptions and error messages; and the checks already described: binary interface, schema compatibility, instruction counts & Baselines need a policy for storage \\
+Coverage & cargo-llvm-cov~\cite{cargollvmcov} for Rust and for C and C++ built with a matching Clang; dispatch coverage; coverage of errors & Fortran, and code built with GCC, need a separate tool \\
+Address and undefined-behavior sanitizers & Rust, the vendored Lua, the Kokkos adapter and the example packages, all built instrumented & Needs nightly Rust; does not reach code on a GPU \\
+Memory sanitizer & The core and the vendored Lua only & Cannot cover the libraries a full build links \\
+Fuzzing & The file reader and the validator & Bounded time in each run \\
+\bottomrule
+\end{tabularx}
+\caption{Kinds of testing.}
+\label{tab:testkinds}
+\end{table}
+
+\paragraph{Regression.}  Database files describe themselves
+(Section~\ref{sec:file-schema}), so one comparison tool serves every
+package.  Each field declares, in the schema, the tolerance within which
+two values agree.  Where the layout is the same the comparison is bit for
+bit; across ranks, devices and compilers it is within the tolerance.
+Generated text (the C header, the description of a package, error messages)
+is compared with stored snapshots.
+
+Database files are too large to keep in a repository.  The repository
+therefore holds only small summaries of each baseline, norms and hashes of
+its fields, and the full files are kept outside it.  Replacing a baseline is
+an explicit command, and it appears in review as a change to a summary.
+
+\subsection{Coverage}
+
+Line coverage is collected for Rust with cargo-llvm-cov, which works on the
+stable compiler and can include C and C++ that were built with a Clang
+matching the Rust compiler's LLVM~\cite{cargollvmcov}.  The percentage is
+reported and watched for falls.  It is not a gate, because a percentage is
+a weak target.  Two measures that the infrastructure can make in its own
+terms are worth more.
+
+\begin{itemize}
+  \item \emph{Dispatch coverage.}  The registry holds every entry of the
+        dispatch table: every kernel, for every type and every device
+        (Section~\ref{sec:dispatch}).  The harness reports the entries that
+        no test called.  For the kernels a package ships, this one is a
+        gate.
+  \item \emph{Coverage of errors.}  Every error of validation has an
+        identifier (Section~\ref{sec:strict}), and a test that expects a
+        rejection names it.  The harness reports the errors that no test
+        provokes, so the validation of Section~\ref{sec:validation} is
+        itself tested.
+\end{itemize}
+
+\subsection{Sanitizers}
+\label{sec:sanitizers}
+
+\begin{itemize}
+  \item \emph{The address and undefined-behavior sanitizers} are run on a
+        build in which the Rust core, the vendored Lua, the Kokkos adapter
+        and the example packages are all instrumented, so that errors which
+        cross the language boundary are caught.  Sanitizer support in Rust
+        is still an unstable feature of the nightly
+        compiler~\cite{rustsanitizers}.  That is acceptable in a test job,
+        since the product itself continues to build on stable Rust
+        (Section~\ref{sec:language}).
+  \item \emph{The undefined-behavior sanitizer does not examine Rust.}  It
+        covers the C, C++ and Fortran in a build.  For unsafe Rust the
+        equivalent is Miri.
+  \item \emph{Neither reaches code that runs on a GPU.}
+  \item \emph{The memory sanitizer is confined to the core.}  It requires
+        every piece of code in the program to be instrumented, the Rust
+        standard library included, and reports false positives
+        otherwise~\cite{rustsanitizers}.  A full build links MPI, HDF5 and
+        Kokkos, and maintaining instrumented builds of all three is a large
+        cost.  The memory sanitizer is therefore run on a build of the core
+        and the vendored Lua alone, which the internal interfaces for MPI
+        and for files make possible.  Elsewhere, reads of uninitialized
+        memory are looked for with Valgrind~\cite{valgrind}.
+\end{itemize}
+
+\subsection{Fuzzing}
+\label{sec:fuzzing}
+
+Two parts of the core accept input they cannot trust: the reader of
+database files, and the validator that every command passes through.  Both
+are fuzzed, with cargo-fuzz~\cite{cargofuzz}, for a bounded time in each
+nightly run, and any input that causes a failure is kept as a regression
+test.
+
 \subsection{What GitHub's hosted runners provide}
 
 For a public repository the standard hosted runners are free and
@@ -3433,6 +3630,7 @@ They are insufficient in three respects.
 \end{description}
 
 \subsection{Four tiers}
+\label{sec:tiers}
 
 \begin{table}[ht]
 \centering
@@ -3441,9 +3639,9 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
-2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; sanitizers across the language boundary; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
-3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
+1 & Hosted; every push and pull request & Formatting and lints; unit and property tests on Linux (both architectures) and macOS; the test scripts on the host, with their check, restart and rank variants; dispatch coverage and coverage of errors; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
+2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; the test scripts under the address and undefined-behavior sanitizers; the memory sanitizer on the core alone; fuzzing for a bounded time; line coverage; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
+3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; the device variants of the test scripts; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
 4 & A cluster; per campaign & Vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
 \bottomrule
 \end{tabularx}
@@ -3705,7 +3903,8 @@ Analytic fields & Formulas in a driver are symbolic expressions, built directly 
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
-Testing & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
+Testing & Tests are driver-role scripts with a test module, each run in its own process, from which the harness derives check, restart, rank, device and sanitizer variants; one orchestrator written in Rust; database files compared within tolerances declared per field, with only small summaries of baselines in the repository; line coverage reported, dispatch coverage and coverage of errors enforced; address and undefined-behavior sanitizers on a build instrumented in every language, the memory sanitizer on the core alone; fuzzing of the file reader and the validator \\
+Continuous integration & Hosted CI for correctness on every push and a wider nightly matrix; instruction counts for performance regressions; a script run locally on a GPU workstation for real devices and timings; a cluster for vendor toolchains and scaling \\
 Platforms & Linux supported; macOS for development; Windows not supported \\
 Build system & Cargo for the core, with an explicit installation step; CMake for C++ and Fortran bindings and packages against the installed library; Spack for distribution \\
 Deferred & WebAssembly components for sandboxed extensions; Rust-specific stable ABIs \\
