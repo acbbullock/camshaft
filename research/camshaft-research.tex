@@ -85,6 +85,9 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+Formulas that a user writes in a driver script are captured as symbolic
+expressions, checked for dimensional consistency before the run and
+evaluated into columns without Lua (Section~\ref{sec:expressions}).
 Errors are to be caught at the earliest stage that can detect them: by the
 compilers, by offline checks of definition and driver scripts, when a package
 is loaded, and before the first cycle of a run, in preference to during it
@@ -408,10 +411,13 @@ language compatible with \ref{req:perf} is that the script decides
 execute a number of operations proportional to the number of commands, tables
 and cycles, never to the number of cells or particles.  A user-supplied
 expression that must be evaluated per element (an initial condition, a source
-term) is the one place this is hard, and there are three acceptable answers:
-evaluate it once on the host to fill a column; translate a restricted
-expression into a kernel; or require a compiled plugin.  Calling back into Lua
-from inside a kernel is not acceptable, and is impossible on a GPU.
+term) is the one place this is hard.  Section~\ref{sec:expressions} settles
+how it is handled.  The formula is captured as a symbolic expression and
+evaluated without Lua; a compiled kernel in a package is always available;
+and for a formula that cannot be captured, one exception to the rule above is
+allowed, a fill of a column on the host, once, under an explicit name.
+Calling back into Lua from inside a kernel is not acceptable, and is
+impossible on a GPU.
 
 \subsection{Definition scripts and driver scripts}
 \label{sec:scripts}
@@ -2118,7 +2124,9 @@ should be a standard sequence of messages:
         \emph{transfer map} relating new rows to old ones;
   \item \emph{transfer}: each field is carried across the transfer map by a
         handler chosen by the field's declared transfer rule (inject,
-        interpolate, conserve, or a package-supplied kernel);
+        interpolate, conserve, a package-supplied kernel, or, for an
+        analytic field, evaluation afresh as in
+        Section~\ref{sec:expressions});
   \item \emph{rebalance}: rows are repartitioned and migrated;
   \item \emph{changed}: everything that depends on the mesh is told.
 \end{enumerate}
@@ -2200,7 +2208,8 @@ lesson: a \emph{mesh protocol}, which is a written convention and not code.
 It states what tables, columns, relations and index spaces a mesh of each
 kind exposes, by what names, with what meaning, and which messages a mesh
 package must answer (the sequence of Section~\ref{sec:mesh-change}, ghost
-filling, geometric queries).  Physics packages are written against the
+filling, geometric queries, the projection of expressions onto its tables as
+in Section~\ref{sec:expressions}).  Physics packages are written against the
 protocol; mesh packages implement it.
 
 The protocol should be specified alongside the infrastructure but stay out of
@@ -2227,6 +2236,309 @@ None of these contradicts an earlier recommendation.  The division of labor
 is that the infrastructure understands \emph{structure} (tables, relations,
 ownership, versions) and the mesh package understands \emph{meaning}
 (topology, geometry, quality, refinement criteria).
+
+%------------------------------------------------------------------------------
+\section{Expressions and analytic fields}
+\label{sec:expressions}
+
+Users will want to give a field by a formula: an initial density, a
+time-dependent drive, an exact solution to compare against.  An
+\emph{analytic field} is a field whose values are given by a formula in
+space, time and other data, and not by stored state.
+Section~\ref{sec:dsl} ruled out calling Lua for each element.  This section
+says what is done instead.
+
+\subsection{Expressions, not callbacks}
+
+The driver does not hand the core a function to call.  It builds an
+\emph{expression}: a tree whose leaves are coordinates, time and constants,
+and whose nodes are operations.  Coordinates and time are symbolic values,
+and arithmetic on them builds the tree.  Lua runs once, to build it, and
+plays no part in evaluating it.  This is the staging pattern of Regent and
+Terra (Section~\ref{sec:prior}).  The tree is data in the registry, as a
+record is, and that is the source of every advantage below: it can be
+checked before the run, evaluated on a device, recorded in the output and
+evaluated again whenever it is needed.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- Symbolic coordinates and time.  With units = true they are quantities.
+local x, y, z, t = cam.coordinates{ units = true }
+local w   = cam.quantity(2.0, "mm")
+local rho = cam.quantity(1.2, "kg/m^3") * cam.exp(-(x^2 + y^2) / w^2)
+
+-- An initial condition: evaluated once, before the first cycle.
+mesh.cells:set("density", rho)
+
+-- A field the driver adds, kept current in every cycle.
+local E0    = cam.quantity(1.0e5, "V/m")
+local omega = cam.quantity(2.0e9, "rad/s")
+mesh.cells:define("drive", E0 * cam.sin(omega * t), { refresh = "cycle" })
+\end{lstlisting}
+
+In the sketch \code{mesh.cells} stands for a table of cells that a mesh
+package exposes, and the names of the functions are placeholders, as in
+Section~\ref{sec:sketch}.
+
+\paragraph{Tracing.}  A user may also write an ordinary Lua function.  The
+core calls it once, with symbolic arguments, and records the tree that
+results.  In the driver's environment the mathematical library accepts
+symbolic values, so a function written for numbers usually traces as it
+stands.  What cannot be traced is a decision that depends on a value.  Lua
+converts the result of every comparison to a boolean~\cite{lua55}, so a
+comparison cannot be made to build a tree, and an \code{if} on a symbolic
+value has nothing to test.  Comparisons are therefore functions, and a
+piecewise field is written with \code{cam.where}, which takes a condition
+and two expressions.  An attempt to branch on a symbolic value is an error
+when the driver is checked, with a message that says so.
+
+\paragraph{Leaves.}  The leaves of an expression may be more than
+coordinates and time.
+
+\begin{itemize}
+  \item \emph{Parameters and the fields of records}, which become constants
+        of the tree.
+  \item \emph{Other columns.}  An expression over existing columns is a
+        derived field, such as a kinetic energy formed from a density and a
+        velocity.
+  \item \emph{Tabulated data}, through a node that interpolates.
+  \item \emph{A random source} keyed by the global identifier of the row,
+        of the counter-based kind~\cite{random123}, so that the values do
+        not depend on how the mesh is partitioned.
+\end{itemize}
+
+\subsection{Operators and functions}
+\label{sec:expr-functions}
+
+An expression may use the arithmetic of Lua and the numerical functions of
+its mathematical library~\cite{lua55}.
+
+\begin{itemize}
+  \item \emph{Operators}: \code{+}, \code{-}, \code{*}, \code{/},
+        \code{\textasciicircum}, unary minus, the modulo operator \code{\%}
+        and floor division \code{//}.  Lua allows each of these to be
+        redefined for a new kind of value, which is how they come to build
+        a tree.
+  \item \emph{Functions of Lua's library}: \code{abs}, \code{floor},
+        \code{ceil}, \code{sqrt}, \code{exp}, \code{log}, \code{sin},
+        \code{cos}, \code{tan}, \code{asin}, \code{acos}, \code{atan},
+        \code{min}, \code{max}, \code{fmod}, \code{modf}, \code{frexp},
+        \code{ldexp}, \code{deg} and \code{rad}, and the constants
+        \code{pi} and \code{huge}.
+  \item \emph{Functions Lua lacks}: the hyperbolic functions, the error
+        function, \code{hypot}, a sign function and others of the kind are
+        supplied by \code{cam}.
+\end{itemize}
+
+The rule for admitting a function is that every evaluator, on the host and
+on a device, implements it, and implements the same definition.  The two
+forms of modulo show why the definition matters.  The operator \code{\%}
+is the remainder of a division that rounds toward minus infinity, so its
+result has the sign of the divisor; \code{fmod} is the remainder of a
+division that rounds toward zero, so its result has the sign of the
+dividend, as in C.  An expression keeps whichever the user wrote.
+
+Three things are excluded.
+
+\begin{enumerate}
+  \item \textbf{Comparisons and logic.}  The comparison operators, and
+        \code{and}, \code{or} and \code{not}, cannot build a tree, for the
+        reason given above.  They are available as functions, with
+        \code{cam.where} to choose between two expressions.
+  \item \textbf{\code{math.random}.}  It is replaced by the random source
+        keyed by global identifier.
+  \item \textbf{Functions that inspect a number}: \code{math.type},
+        \code{math.tointeger} and \code{math.ult} have no meaning for a
+        symbolic value, and using one is an error.
+\end{enumerate}
+
+Transcendental functions may differ in their last bits between the
+mathematical libraries of a host and of a device.  An expression evaluated
+on a GPU is therefore not guaranteed to match its evaluation on the host
+bit for bit, and tests that compare the two must allow for it.
+
+\subsection{To a kernel, a column}
+
+A kernel is opaque compiled code that reads columns
+(Section~\ref{sec:gpu}), so an analytic field reaches it as a column.  The
+expression is evaluated into the column under a \emph{refresh policy}:
+once, for an initial condition; in every cycle, for a field that depends on
+time; or whenever the table changes.  The version counters of
+Section~\ref{sec:mesh-change} tell the core when a column is stale.  After
+the mesh is adapted, the transfer rule of an analytic field is to evaluate
+it afresh on the new rows, not to interpolate from the old ones.
+
+\paragraph{Time.}  By default a field refreshed in every cycle is evaluated
+at the time at which the cycle starts.  An integrator with several stages
+needs it at intermediate times, so a package may ask for an analytic field
+to be evaluated at a stated time.
+
+\subsection{The function and its sampling}
+
+A formula is defined over space and time.  A mesh supplies only the points
+at which it is sampled, and there is more than one reasonable choice: the
+centers of cells, the nodes, quadrature points, the positions of particles.
+What is wanted may not be a sample at all.  A finite-volume method wants
+the average of the function over each cell, and a finite-element method
+wants a projection onto its basis.
+
+The division of labor is the one Section~\ref{sec:mesh} draws between
+structure and meaning.  The core evaluates an expression at any column of
+points it is given.  The mesh or physics package decides which points, and
+how the samples become the values of the field, by answering a projection
+message that the mesh protocol defines (Section~\ref{sec:mesh-protocol}).
+
+\subsection{Units}
+
+Units in expressions are opt-in, and the rules extend those for driver
+scripts in Section~\ref{sec:validation}.
+
+\begin{enumerate}
+  \item \textbf{Without units, everything is a bare number.}  Coordinates
+        are numbers in the unit of the mesh's coordinates, time is a number
+        in the unit of the clock, and the result is taken in the unit of
+        the field it fills.  Nothing is checked.
+  \item \textbf{With units, the whole expression is checked.}  When the
+        driver asks for dimensioned coordinates, every value in the tree
+        has a dimension (Section~\ref{sec:units}).  The exponential of a
+        length is an error, adding a bare number to a length is an error,
+        and the dimension of the result must be that of the field.
+        Trigonometric functions accept an angle or a dimensionless number,
+        which is taken to be in radians.
+  \item \textbf{Conversion costs nothing at run time.}  Conversion factors
+        are folded into the constants of the tree when it is built.
+\end{enumerate}
+
+With units, each operator and function has a rule for dimensions.
+Table~\ref{tab:expr-units} gives those that are not obvious.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{44mm} L@{}}
+\toprule
+Operation & Rule when units are in use \\
+\midrule
+\code{\%}, \code{//}, \code{fmod} & Both arguments must have the same dimension.  \code{\%} and \code{fmod} return that dimension, which is what a periodic profile such as \code{x \% wavelength} needs; \code{//} returns a dimensionless number \\
+\code{floor}, \code{ceil}, \code{modf} & The argument must be dimensionless, since the floor of a length would depend on the unit it was expressed in \\
+\code{sqrt}, and \code{\textasciicircum} with a constant exponent & The dimension is raised to the power, so dimensions carry rational exponents \\
+\code{\textasciicircum} with any other exponent, \code{exp}, \code{log} & The arguments must be dimensionless \\
+\code{min}, \code{max}, \code{abs} & The arguments must share a dimension, which the result keeps \\
+\code{atan} with two arguments & The arguments must share a dimension, and the result is an angle \\
+\bottomrule
+\end{tabularx}
+\caption{Dimension rules for operators and functions in expressions.}
+\label{tab:expr-units}
+\end{table}
+
+The check is made on the tree, when the driver is checked, and does not
+require the expression to be evaluated anywhere.  This is the principal
+gain over a callback, whose units could be examined only at the points at
+which it happened to be called.
+
+\subsection{Evaluation}
+
+There are three ways to evaluate a tree, and they should be built in this
+order.
+
+\begin{enumerate}
+  \item \textbf{A host evaluator in the core}, which works through the tree
+        a column at a time, so that each operation is one loop over a
+        buffer.
+  \item \textbf{A device evaluator in the Kokkos adapter}, a small
+        interpreter that runs for each element inside a single kernel.
+        This needs no compilation at run time and works on every back end
+        Kokkos supports.  AMReX's parser, which WarpX uses for analytic
+        density and field profiles, evaluates expressions supplied at run
+        time on GPUs from several vendors~\cite{amrexparser,warpxparams}.
+  \item \textbf{Generated kernels.}  The check invocation, or a preparation
+        step like it, can write a kernel for each expression in a driver
+        and compile it into a small plugin before the run is submitted.
+        This is the fastest route and can wait until measurement shows that
+        the second is too slow.
+\end{enumerate}
+
+\subsection{Checking}
+
+\begin{itemize}
+  \item \emph{When the driver is checked}: that the names in an expression
+        exist, that its dimensions are consistent, that its result suits
+        the field, and that no branch was attempted on a symbolic value.
+  \item \emph{In the pre-flight}: failures that depend on the data, such as
+        the square root of a negative number, appear only on evaluation.
+        Columns filled before the first cycle are checked then for values
+        that are not finite and for the ranges their fields declare, so
+        that a bad initial condition stops the run at cycle~0.
+\end{itemize}
+
+\subsection{The fill on the host}
+
+Some functions cannot be traced and have no form as an expression: a loop
+that runs until an iteration converges, a call into other Lua code, a read
+from a file.  For these one exception to the rule of Section~\ref{sec:dsl}
+is allowed.  The driver may give an ordinary Lua function, which is called
+with numbers, once for each row, on the host, to fill a column.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+mesh.cells:fill_on_host("density", function(x, y, z)
+  local rho = 1.0
+  repeat                              -- runs until converged: untraceable
+    local step = f(rho, x, y) / df(rho, x, y)
+    rho = rho - step
+  until math.abs(step) < 1e-12
+  return rho
+end)
+\end{lstlisting}
+
+The exception is bounded in four ways.
+
+\begin{itemize}
+  \item \emph{It has an explicit name.}  A function given where an
+        expression is expected is traced, and if it cannot be traced that
+        is an error.  The fill on the host happens only when it is asked
+        for by name.
+  \item \emph{It is for fills made once.}  It cannot have a refresh policy,
+        and it cannot be evaluated afresh after the mesh is adapted.
+  \item \emph{It runs on the host.}  A column that lives on a device is
+        filled on the host and copied.
+  \item \emph{It carries no units.}  The function receives bare numbers and
+        returns one, which is taken in the unit of the field.
+\end{itemize}
+
+It costs one call into Lua for every row, which is tolerable once and would
+be ruinous in every cycle.  It is also checked less well than an
+expression: a mistake that shows only at certain positions is found during
+the real fill, which is before the first cycle but after the wait in the
+queue.  Three measures reduce that.  The check invocation calls the
+function at several points across the extent of the domain, not at one.  It
+times those calls and reports an estimate of the time the fill will take on
+each rank.  And the pre-flight checks the filled column as it does any
+other.  The output records where in the script the function was given,
+since there is no formula to record.
+
+A user for whom neither an expression nor this fill will do can compute the
+values elsewhere and import them, from a file or with Python as the host
+(Section~\ref{sec:build}), or can supply a compiled kernel in a package.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item The registry holds expressions, and the C interface can create and
+        evaluate them.
+  \item The driver's environment supplies symbolic coordinates and time, a
+        mathematical library that accepts symbolic values, comparison
+        functions and \code{cam.where}, and traces a function given where
+        an expression is expected.  The operators and functions of
+        Section~\ref{sec:expr-functions} are implemented, to one
+        definition, by every evaluator.
+  \item A field may be bound to an expression with a refresh policy, and
+        \enquote{evaluate afresh} joins the transfer rules.
+  \item The core has a host evaluator; the Kokkos adapter has a device
+        evaluator.
+  \item The mesh protocol gains a projection message.
+  \item The pre-flight checks columns filled before the first cycle.
+  \item A fill on the host by an untraced function exists under an explicit
+        name, for fills made once.
+\end{enumerate}
 
 %------------------------------------------------------------------------------
 \section{Validation}
@@ -2269,8 +2581,8 @@ Compilation & In the core, memory errors and data races, by the Rust compiler.  
 Definition check & Names; namespaces and ownership; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
 Loading a package & Each kernel's declared columns, with their types and units, against the schema; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
-Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; every Lua handler, by calling it once & A login node, for seconds \\
-Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built & The real run, before its first cycle \\
+Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
+Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
 During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
 \bottomrule
 \end{tabularx}
@@ -2500,11 +2812,17 @@ cycle on which its message is first sent.
         produces many small heterogeneous groups, where tables are short and
         per-table overhead is no longer negligible.  The prototype should
         measure the table size at which dispatch overhead becomes visible.
-  \item \textbf{Expressions in the DSL.}  Users will want to write formulas
-        in the input file and have them evaluated per element.
-        Section~\ref{sec:dsl} lists three answers; choosing among them needs
-        experiment, and translating expressions to kernels reopens the GPU
-        compilation question.
+  \item \textbf{Expressions in the DSL.}  Section~\ref{sec:expressions}
+        commits to symbolic expressions, and three things in it are untried.
+        Tracing a Lua function has limits that users will meet, and the
+        errors it reports must be good enough to explain them.  The
+        evaluator on a device interprets an expression for each element,
+        and how much slower that is than a compiled kernel has to be
+        measured; generated kernels are the remedy, and they reopen the
+        question of compiling for a GPU.  And the division between the core,
+        which evaluates at points, and the package, which decides what
+        points and how to project, has not been tested against a real
+        discretization.
   \item \textbf{Two storage classes.}  Section~\ref{sec:records} separates
         records from bulk tables.  The boundary is clear for a solver and
         for a particle, and less clear in between: a problem with thousands
@@ -2618,7 +2936,10 @@ through every milestone from M1.
         (Section~\ref{sec:docs}).  Strict environments and error reports
         that point at the user's line; the driver check with its shadow
         state, in which every registered handler is called once; quantities
-        with units (Section~\ref{sec:validation}).
+        with units (Section~\ref{sec:validation}).  Symbolic expressions
+        built directly and by tracing; their dimensional analysis; the host
+        evaluator; analytic fields with refresh policies; the fill on the
+        host (Section~\ref{sec:expressions}).
         \emph{Measure:} time spent in Lua per cycle for a realistic
         script.  The target is a negligible fraction.
   \item[M4. C interface and a foreign package.]
@@ -2664,6 +2985,9 @@ through every milestone from M1.
         \emph{Also verify:} the completion contract (fence on return, then
         completion events); serial dispatch of Kokkos handlers; Krokkos as a
         route for Rust packages.
+        \emph{Expressions:} the evaluator of
+        Section~\ref{sec:expressions} in the Kokkos adapter, measured
+        against a hand-written kernel for the same formula.
         \emph{Meshes:} relations on the device and a Kokkos kernel that
         gathers through one; block fields as a single four-dimensional view
         over all blocks; adaptation with data resident on the device, using
@@ -2682,7 +3006,8 @@ through every milestone from M1.
         the earlier milestones taught.  Implement it twice, for the
         unstructured and the block-based mesh, and write one small physics
         package against the protocol that runs unchanged on both where the
-        discretization allows.
+        discretization allows.  Projection of an expression by each mesh
+        package: a point sample and a cell average.
 \end{description}
 
 Milestones M1 to M4 exercise every architectural decision that does not
@@ -3046,6 +3371,7 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+Analytic fields & Formulas in a driver are symbolic expressions, built directly or by tracing a Lua function once; evaluated into columns with a refresh policy, on the host by the core and on a device by the Kokkos adapter; units opt-in for each expression and then checked throughout; projection decided by the mesh or physics package; a fill on the host by an untraced function allowed once, under an explicit name \\
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
