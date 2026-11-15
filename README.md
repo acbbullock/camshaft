@@ -20,4 +20,4 @@ cd research
 make            # requires latexmk, pdflatex and biber
 ```
 
-The PDF is a build artefact and is not tracked.
+The PDF is a build artifact and is not tracked.

@@ -133,9 +133,9 @@ here so that later sections can refer to them.
         allocation; a check costs seconds.
 \end{enumerate}
 
-Two of these pull against the rest.  \ref{req:perf} and \ref{req:port} favour
+Two of these pull against the rest.  \ref{req:perf} and \ref{req:port} favor
 static, ahead-of-time, monomorphic code; \ref{req:interp}, \ref{req:dsl},
-\ref{req:schema} and \ref{req:lang} favour run-time flexibility.  Most of the
+\ref{req:schema} and \ref{req:lang} favor run-time flexibility.  Most of the
 design questions in this report are questions about where to put the boundary
 between the two.
 
@@ -165,7 +165,7 @@ papers and documentation.
 \label{sec:prior}
 
 No existing framework meets all nine requirements, but each requirement has
-been met somewhere.  Table~\ref{tab:prior} summarises the systems that were
+been met somewhere.  Table~\ref{tab:prior} summarizes the systems that were
 examined, and the paragraphs below draw out what \camshaft{} should take from
 them.
 
@@ -184,7 +184,7 @@ Parthenon~\cite{parthenon} & C++ on Kokkos & Parameter file & Variables declared
 Kokkos~\cite{kokkos3} & C++ & None (a library) & One kernel source, many back ends; host and device mirrors \\
 Legion and Regent~\cite{legion,regent} & C++; Lua and Terra & Regent, embedded in Lua & Data described as regions with declared privileges; Lua as a staging language \\
 Charm++~\cite{charm} & C++ & Interface files & Message-driven objects; the runtime owns scheduling \\
-Julia~\cite{julia} & Julia & Julia & Multiple dispatch with specialisation \\
+Julia~\cite{julia} & Julia & Julia & Multiple dispatch with specialization \\
 \bottomrule
 \end{tabularx}
 \caption{Systems examined and the idea each contributes.}
@@ -206,7 +206,7 @@ framework defines named points in the life of a run; an object declares which
 of them it responds to; the framework calls each object at each point it
 declared.  This is already message dispatch, and it is cheap, because the
 framework consults the declarations once and builds a call list per hook.
-\camshaft{} should generalise it by letting packages define new messages as well
+\camshaft{} should generalize it by letting packages define new messages as well
 as new receivers.
 
 \paragraph{Declared data.}  Cactus, Parthenon and Legion all require packages
@@ -230,9 +230,9 @@ of its clients (Section~\ref{sec:kokkos}).
 
 \paragraph{Lua in high-performance computing.}  Regent is implemented as a
 language embedded in Lua, using Terra~\cite{terra} to generate low-level code.
-Lua runs at program start to build and specialise the program; the generated
+Lua runs at program start to build and specialize the program; the generated
 code runs without Lua.  This staging pattern (script first, compiled kernels
-afterwards) is the model for how \camshaft{} should use Lua.
+afterward) is the model for how \camshaft{} should use Lua.
 
 %------------------------------------------------------------------------------
 \section{Implementation language}
@@ -269,14 +269,14 @@ C++ & Kokkos, SYCL, the entire existing ecosystem & Excluded from the core by th
 
 \paragraph{What Rust gets right for this project.}  The requirements ask for
 both kinds of dispatch, and Rust offers both without ceremony: generics and
-traits are monomorphised and inlined, and \code{dyn Trait} gives an explicit
+traits are monomorphized and inlined, and \code{dyn Trait} gives an explicit
 virtual table where one is wanted.  Procedural macros can derive schema
 descriptions from ordinary type definitions, which removes the need for the
 separate interface compilers that Cactus and Charm++ rely on.  Declaring
 \code{\#[repr(C)]} types and \code{extern "C"} functions gives exact control
 of layout and calling convention, and tools such as \code{cbindgen} generate
 the C header from the Rust source~\cite{cbindgen}.  Finally, Rust's aliasing
-rules give the optimiser the \enquote{no two mutable references overlap}
+rules give the optimizer the \enquote{no two mutable references overlap}
 guarantee that Fortran compilers have always exploited and C compilers must be
 told about with \code{restrict}.  Rust also serves \ref{req:early} directly:
 memory errors and data races in the core are rejected by the compiler and
@@ -358,7 +358,7 @@ front end, without touching the core.
 \toprule
 Language & For & Against \\
 \midrule
-Lua 5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library; permissive by default, so that a misspelt name yields \code{nil} and not an error (Section~\ref{sec:strict} closes this) \\
+Lua 5.5 & Tiny, portable ANSI C; designed for embedding; 64-bit integers and floats; coroutines; tables double as a configuration format & One-based indexing surprises some users; small standard library; permissive by default, so that a misspelled name yields \code{nil} and not an error (Section~\ref{sec:strict} closes this) \\
 LuaJIT & Much faster than the reference interpreter; excellent foreign function interface & Frozen at Lua~5.1 semantics; no tagged releases; narrower platform coverage \\
 Luau & Gradual types; sandboxing; actively developed & A dialect; implemented in C++ \\
 Python & Familiar to nearly every scientist & Heavy; start-up and import cost; embedding fixes the interpreter version for every package \\
@@ -376,7 +376,7 @@ Tcl & Long history as a simulation command language & Dated; string-based semant
 Lua is recommended.  It was designed to be embedded in a host program and to
 describe data; a Lua table is simultaneously a record, an array and a
 configuration block, so a declarative input deck and a script with loops are
-the same kind of file.  Coroutines map naturally on to an event-driven
+the same kind of file.  Coroutines map naturally onto an event-driven
 interpreter: a script can yield while the simulation advances and be resumed
 when an event fires.  The interpreter is a few hundred kilobytes and has no
 start-up cost worth measuring, which matters when it is launched on every MPI
@@ -628,7 +628,7 @@ are fixed here.
         A named list of fields, such as \code{pusher.Particle} in the
         example of Section~\ref{sec:sketch}.  It is a
         description held in the registry and nothing more: it contains no
-        data and no behaviour.  The nearest familiar things are a
+        data and no behavior.  The nearest familiar things are a
         \code{struct} declaration and the definition of a database table.
   \item[Field.]
         One named member of a type.  It has a name, an element type
@@ -803,7 +803,7 @@ from here on.
         the same dimension, but not the reverse: energy and moment of force
         share a dimension, and so do frequency and angular velocity.
   \item[Unit.]
-        The reference in which a value is expressed: the metre, the
+        The reference in which a value is expressed: the meter, the
         megabar.
   \item[System of units.]
         A choice of base units, one for each base dimension.  Every other
@@ -819,7 +819,7 @@ from here on.
 \paragraph{The model.}  A field states its kind of quantity, and its unit is
 the coherent unit of that kind in the package's system of units.
 Table~\ref{tab:unitsystems} shows what follows for pressure in three systems.
-The third, centimetre--gram--microsecond, is common in shock hydrodynamics
+The third, centimeter--gram--microsecond, is common in shock hydrodynamics
 and is in no library's built-in list.
 
 \begin{table}[ht]
@@ -830,8 +830,8 @@ and is in no library's built-in list.
 System of units & Length & Mass & Time & Coherent unit of pressure \\
 \midrule
 SI & m & kg & s & Pa \\
-Centimetre--gram--second & cm & g & s & $0.1$\,Pa (the barye) \\
-Centimetre--gram--microsecond & cm & g & \textmu s & $10^{11}$\,Pa (the megabar) \\
+Centimeter--gram--second & cm & g & s & $0.1$\,Pa (the barye) \\
+Centimeter--gram--microsecond & cm & g & \textmu s & $10^{11}$\,Pa (the megabar) \\
 \bottomrule
 \end{tabular}
 \caption{Three systems of units and the unit of pressure that follows from each.}
@@ -856,7 +856,7 @@ Five refinements make the model usable.
   \item \textbf{A system of units is data.}  It is a record
         (Section~\ref{sec:records}) giving the size of each base unit
         relative to the SI.  That admits systems no library ships, and
-        normalised systems whose reference scales are computed from the
+        normalized systems whose reference scales are computed from the
         parameters of a run.
   \item \textbf{Physical constants belong to the system of units.}  The core
         supplies constants such as the Boltzmann constant, expressed in the
@@ -887,8 +887,8 @@ them can be handled automatically.
 
 \begin{itemize}
   \item \emph{Changing the system of units is arithmetic.}  Going from
-        centimetre--gram--second to the SI, or to
-        centimetre--gram--microsecond, multiplies each value by a factor
+        centimeter--gram--second to the SI, or to
+        centimeter--gram--microsecond, multiplies each value by a factor
         that follows from its dimension.  The core can do this for any
         field.
   \item \emph{Changing the system of quantities is not.}  Electromagnetism
@@ -916,8 +916,8 @@ styles that determine the units of every quantity~\cite{lammpsunits}.
 not share a system of units.  Each column is stored in the unit its owner
 declared.  A kernel declares the unit it expects of every column it uses,
 and the binding check refuses a mismatch when the package is loaded
-(Section~\ref{sec:validation}).  A mesh package in centimetres and a physics
-package in metres can therefore coexist so long as no kernel reads a column
+(Section~\ref{sec:validation}).  A mesh package in centimeters and a physics
+package in meters can therefore coexist so long as no kernel reads a column
 in a unit it did not expect.  Where two such packages must share a column,
 one of them must be unit-agnostic, or a conversion must be requested
 explicitly.  The core may offer that conversion as a bulk operation, and
@@ -944,7 +944,7 @@ small C structures for handing columns between libraries without copying: the
 C data interface~\cite{arrowcdata} and the C device data
 interface~\cite{arrowcdevice}.  The second extends the first to buffers that
 live in device memory.  It carries a device type and identifier and an
-optional synchronisation event, keeps all metadata on the host, and
+optional synchronization event, keeps all metadata on the host, and
 deliberately uses the same device-type numbering as DLPack~\cite{dlpack}, the
 tensor-exchange convention used by the Python array libraries.  Its device
 list already includes CUDA, pinned CUDA host memory, ROCm, OpenCL, Vulkan,
@@ -964,7 +964,7 @@ Arrow or DLPack (which includes NumPy, CuPy, PyTorch, cuDF and Julia) can view
 
 Each column should own up to two buffers, one on the host and one on a device,
 with flags recording which is current.  This is the pattern Kokkos calls a
-dual view~\cite{kokkos3}.  It keeps synchronisation explicit and lazy: a
+dual view~\cite{kokkos3}.  It keeps synchronization explicit and lazy: a
 kernel declares which columns it reads and writes and where it runs, and the
 store copies only what is stale.  The cost of getting this wrong is large.
 The Rust offload study found that transferring data automatically at every
@@ -981,7 +981,7 @@ The schema carries enough information to write and read any table without
 package-specific code, and the same holds for records, which are written
 with the tables they configure.  HDF5 and ADIOS2 are the obvious targets; both are C
 libraries with C interfaces.  Checkpoint and restart should be designed with
-the store, not added afterwards, because schema versioning is much easier to
+the store, not added afterward, because schema versioning is much easier to
 build in than to retrofit.
 
 %------------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ progress, for four reasons.
 
 \begin{itemize}
   \item \emph{Not every run has a physical time.}  A mesh generator, a
-        steady-state solve and an optimisation have iterations only.
+        steady-state solve and an optimization have iterations only.
   \item \emph{The count is exact.}  Simulation time is a floating-point sum
         of time steps and accumulates rounding error, so comparisons with it
         need care.  A comparison of integers needs none.
@@ -1105,7 +1105,7 @@ it.
 An indirect call through a table of function pointers costs a few processor
 cycles when the branch predictor guesses the target and tens of cycles when it
 does not.  The larger cost is indirect: the compiler cannot inline through
-the call, and so cannot vectorise across it.  On a GPU the question does not
+the call, and so cannot vectorize across it.  On a GPU the question does not
 arise, since device code generally cannot make indirect calls at all.
 
 Dispatching dynamically \emph{per object} is therefore ruled out by
@@ -1113,8 +1113,8 @@ Dispatching dynamically \emph{per object} is therefore ruled out by
 is essentially free.  If a table holds a million objects of one type, one
 table lookup selects the handler and one indirect call invokes it; the handler
 is a compiled kernel that loops over the columns with everything inside the
-loop statically resolved, inlined and vectorised.  The dispatch overhead is
-amortised over a million elements.
+loop statically resolved, inlined and vectorized.  The dispatch overhead is
+amortized over a million elements.
 
 This gives the central rule of the design:
 
@@ -1153,7 +1153,7 @@ object); several handlers for one message with a defined order; and handlers
 selected by execution device as well as by type.
 
 \paragraph{Static layer.}  Inside the Rust core and inside Rust packages,
-handlers are generic functions over traits and are monomorphised.  A Rust
+handlers are generic functions over traits and are monomorphized.  A Rust
 package registers a handler through a generic function that instantiates the
 kernel for its concrete column types and stores the resulting function
 pointer in the dynamic table.  The package author writes static code; the
@@ -1163,7 +1163,7 @@ its address.
 
 \paragraph{When the type set is closed.}  For messages and types that are all
 known when the program is built, the dynamic table can be bypassed entirely
-and the compiler allowed to resolve the call.  This is an optimisation to
+and the compiler allowed to resolve the call.  This is an optimization to
 apply where measurement shows it matters, not a second architecture.
 
 %------------------------------------------------------------------------------
@@ -1176,9 +1176,9 @@ Portability across CPU architectures is not in doubt.  Rust targets x86-64,
 AArch64, POWER and RISC-V through LLVM, and Lua's reference implementation is
 portable C.  Thread-level parallelism within a kernel is well served by
 existing work-stealing libraries.  Explicit SIMD is the weak point: until
-\code{std::simd} is stabilised~\cite{portablesimd}, stable Rust offers
-auto-vectorisation and architecture-specific intrinsics.  Columnar storage
-with aligned buffers is what auto-vectorisation needs, so this is tolerable.
+\code{std::simd} is stabilized~\cite{portablesimd}, stable Rust offers
+auto-vectorization and architecture-specific intrinsics.  Columnar storage
+with aligned buffers is what auto-vectorization needs, so this is tolerable.
 
 \subsection{GPUs: the options in Rust}
 
@@ -1229,7 +1229,7 @@ prototype and obtained those results with their own extended compiler, and
 support for Intel GPUs is still under development.  The Rust project goal to
 finish the module in the second half of 2025~\cite{offloadgoal} was not
 completed and was superseded by a broader goal for
-2026~\cite{rustgoals2026}, which states that stabilisation will not be
+2026~\cite{rustgoals2026}, which states that stabilization will not be
 requested during that period~\cite{mlgoal2026}.  There is no commitment
 about when, or in what form, it will reach stable Rust.
 
@@ -1246,7 +1246,7 @@ designed so that it does not have to.
 
 \begin{enumerate}
   \item \textbf{The store owns device memory.}  A small device abstraction
-        (allocate, free, copy between host and device, synchronise) is
+        (allocate, free, copy between host and device, synchronize) is
         defined as a table of C function pointers.  It can be implemented
         once per vendor runtime by calling that runtime's C interface, which
         is a few hundred lines per back end and involves no kernel
@@ -1332,7 +1332,7 @@ API, which keeps it honest: anything the DSL can do, a package can do.
   node distance=6mm
 ]
   \node[wide] (core) {Core (Rust): event queue and interpreter loop \quad$\cdot$\quad type registry \quad$\cdot$\quad dispatch tables};
-  \node[wide, below=4mm of core] (store) {Columnar store: tables, host and device buffers, synchronisation, scheduling};
+  \node[wide, below=4mm of core] (store) {Columnar store: tables, host and device buffers, synchronization, scheduling};
   \node[wide, below=4mm of store] (dev) {Device back ends (host memory, CUDA, HIP, \ldots) \quad$\cdot$\quad MPI \quad$\cdot$\quad I/O};
   \node[wide, above=6mm of core, fill=black!6] (cabi) {Versioned C interface: handles, commands, events, handler registration, Arrow and DLPack export};
 
@@ -1370,7 +1370,7 @@ reach GPU runtimes or MPI directly; and Fortran toolchain support is thin.  It
 is worth revisiting for sandboxed control-plane extensions, where none of
 those objections applies.
 
-\paragraph{Remote procedure calls and serialisation.}  Passing messages
+\paragraph{Remote procedure calls and serialization.}  Passing messages
 between processes would give language neutrality at the price of copying all
 data, which \ref{req:perf} rules out for anything but steering and
 monitoring.
@@ -1384,7 +1384,7 @@ handle to the registry and uses it to define types, messages, handlers and new
 DSL commands.  For a package whose definitions are written as a definition
 script (Section~\ref{sec:scripts}), the registration function supplies that
 script, embedded in the library, and registers the kernels it names; the
-core then checks each kernel's declared columns against the schema.  A package may also register initialisation and finalisation
+core then checks each kernel's declared columns against the schema.  A package may also register initialization and finalization
 hooks, which the core calls in a defined order relative to MPI and to other
 packages; Section~\ref{sec:kokkos-needs} explains why these are needed.
 Supporting static linking matters on machines where dynamic loading is
@@ -1418,9 +1418,9 @@ them.  Three properties of Kokkos make this natural.
   \item \textbf{The two data models agree.}  A \camshaft{} column is a contiguous,
         aligned, fixed-width buffer with an optional device copy, which is
         what a view is.  The host and device buffers of
-        Section~\ref{sec:schema} were modelled on Kokkos's dual view in the
+        Section~\ref{sec:schema} were modeled on Kokkos's dual view in the
         first place.
-  \item \textbf{The granularity matches.}  Kokkos parallelises a loop over a
+  \item \textbf{The granularity matches.}  Kokkos parallelizes a loop over a
         range; \camshaft{} dispatches once per table and passes the handler a
         range of rows.  The handler body is one or a few
         \code{parallel\_for} calls.
@@ -1474,21 +1474,21 @@ is the adapter's header.
 Each item below is an obligation on \camshaft{} that the earlier sections did not
 state, or stated only in general terms.
 
-\paragraph{Runtime life cycle.}  Kokkos can be initialised at most once per
-process, and should be initialised after MPI and finalised before MPI is
-finalised~\cite{kokkosdocs}.  The
-plugin interface therefore needs initialisation and finalisation hooks with a
+\paragraph{Runtime life cycle.}  Kokkos can be initialized at most once per
+process, and should be initialized after MPI and finalized before MPI is
+finalized~\cite{kokkosdocs}.  The
+plugin interface therefore needs initialization and finalization hooks with a
 defined order relative to MPI and to other plugins, in addition to the
 registration function of Section~\ref{sec:api}.  \camshaft{} must also tell the
-package which device it selected, so that Kokkos is initialised on the same
+package which device it selected, so that Kokkos is initialized on the same
 one.
 
 \paragraph{One Kokkos per process.}  Kokkos keeps global state.  Two plugins
 that each link their own copy, or that were built against different versions,
 cannot safely share a process.  All Kokkos packages loaded together must use
-one shared Kokkos library, and exactly one party must initialise it.  The
+one shared Kokkos library, and exactly one party must initialize it.  The
 simplest rule is that \camshaft{} offers an optional Kokkos adapter which owns
-initialisation, and packages depend on that adapter.
+initialization, and packages depend on that adapter.
 
 \paragraph{Layout.}  A fixed-size-vector column stored in the Arrow manner is
 interleaved ($x_0 y_0 z_0\, x_1 y_1 z_1 \ldots$), which Kokkos calls
@@ -1499,7 +1499,7 @@ interleaved storage is the right default for vector fields, or whether each
 component should be its own column, is a performance question for M1 and M5;
 the schema should be able to express both.
 
-\paragraph{One source of truth for synchronisation.}  \camshaft{} tracks which of
+\paragraph{One source of truth for synchronization.}  \camshaft{} tracks which of
 a column's host and device buffers is current.  Kokkos's own
 \code{DualView} does the same.  If a package used both, they would disagree.
 Packages must take unmanaged views from \camshaft{} and declare their reads and
@@ -1528,7 +1528,7 @@ should not run its own data-parallel work at the same time as a handler, and
 should let the adapter configure the thread count for both.
 
 \paragraph{Errors.}  A C++ exception that propagates into Rust is undefined
-behaviour.  Handlers must catch everything and return an error code, as in
+behavior.  Handlers must catch everything and return an error code, as in
 the sketch, and the adapter should provide a wrapper that does this so that
 package authors cannot forget.
 
@@ -1569,7 +1569,7 @@ adapter is loaded.  The second option is the lower-risk route to
 Package authors should not write the view-wrapping, exception-catching and
 life-cycle code themselves.  \camshaft{} should ship a small Kokkos adapter: a
 header that turns column handles into typed unmanaged views and wraps
-handlers, and a small library that owns Kokkos initialisation and implements
+handlers, and a small library that owns Kokkos initialization and implements
 the Kokkos-backed allocator.  This is C++ code in the \camshaft{} repository, and
 so it qualifies the brief's wish to avoid C++.  This has been accepted, on
 the following terms: the adapter is a language binding, of the same standing
@@ -1604,8 +1604,8 @@ The answer to the first question is that \code{main} should contain almost
 nothing.  Everything lives in a library, \code{libcamshaft}, behind the C
 interface of Section~\ref{sec:api}.  The library offers one convenience entry
 point that takes the command line and runs a script to completion, and
-beneath it the individual steps (initialise, load a package, run a script or
-a single command, finalise) so that a host can interleave its own work.
+beneath it the individual steps (initialize, load a package, run a script or
+a single command, finalize) so that a host can interleave its own work.
 Three kinds of host then become possible.
 
 \begin{table}[ht]
@@ -1629,7 +1629,7 @@ and a documented library interface~\cite{lammps}, and it is what makes
 \ref{req:lang} hold for the host as well as for packages.  The question
 \enquote{Rust's \code{main} or C's?} therefore has no single answer and does
 not need one.  A Rust \code{main} is the right default: it is the simplest
-thing to build, and a Rust library needs no runtime initialisation when it is
+thing to build, and a Rust library needs no runtime initialization when it is
 called from a \code{main} written in another language, so nothing is lost in
 the other two cases.
 
@@ -1640,14 +1640,14 @@ brings the process up and takes it down, since the runtimes in the process
 depend on one another.  The library should enforce this sequence:
 
 \begin{enumerate}
-  \item initialise MPI, with the thread-support level the loaded packages
+  \item initialize MPI, with the thread-support level the loaded packages
         require, unless the host has already done so;
-  \item select devices and run the initialisation hooks of language bindings
-        (the Kokkos adapter initialises Kokkos here, on the selected device);
+  \item select devices and run the initialization hooks of language bindings
+        (the Kokkos adapter initializes Kokkos here, on the selected device);
   \item load packages and run their registration functions and
-        initialisation hooks, in dependency order;
+        initialization hooks, in dependency order;
   \item run the interpreter loop;
-  \item run finalisation hooks in reverse order, then finalise the bindings,
+  \item run finalization hooks in reverse order, then finalize the bindings,
         then MPI, unless the host owns it.
 \end{enumerate}
 
@@ -1656,7 +1656,7 @@ language, not the package author, should meet them.
 
 \begin{description}[style=nextline,leftmargin=2em]
   \item[Fortran.]
-        Some compilers need their runtime library initialised explicitly when
+        Some compilers need their runtime library initialized explicitly when
         the main program is not Fortran.  Intel's documentation, for example,
         prescribes calls to \code{for\_rtl\_init\_} and
         \code{for\_rtl\_finish\_} and a link option to suppress the Fortran
@@ -1668,7 +1668,7 @@ language, not the package author, should meet them.
         and unloaded; packages should not depend on their order.
   \item[Julia.]
         Either Julia is the host and calls the library, or a Julia binding
-        starts the Julia runtime in its initialisation hook and Julia
+        starts the Julia runtime in its initialization hook and Julia
         functions are registered as handlers through C-callable function
         pointers.  Compiling Julia packages ahead of time into shared
         libraries is possible with JuliaC, on Julia~1.12 or later, but the
@@ -1702,7 +1702,7 @@ language as an ordinary C library with no visible Rust dependency.
 \small
 \begin{tabularx}{\textwidth}{@{}L L@{}}
 \toprule
-Artefact & Linked by \\
+Artifact & Linked by \\
 \midrule
 \code{libcamshaft} (shared and static) and the default executable & The Rust compiler, which invokes the C compiler driver, which invokes the system linker \\
 Kokkos adapter; C++ packages & CMake, through the C++ compiler or the MPI wrapper for it \\
@@ -1732,7 +1732,7 @@ through the C interface like any other; it carries its own copy of Rust's
 standard library, which is harmless because only C types cross the boundary.
 To use the generic Rust interface with full inlining
 (Section~\ref{sec:dispatch}), it must instead be compiled by Cargo
-\emph{together with} the core into one artefact, because Rust has no stable
+\emph{together with} the core into one artifact, because Rust has no stable
 ABI between separately compiled libraries.  In practice that means a small
 \enquote{distribution} crate that depends on the core and on the chosen Rust
 packages and produces the \code{libcamshaft} that everything else links against.
@@ -1772,7 +1772,7 @@ oversubscription.  The build cannot fully prevent this, but the library can
 detect the common cases when a package is loaded and refuse it with a clear
 message.
 
-\paragraph{Optimisation across languages.}  Link-time optimisation across
+\paragraph{Optimization across languages.}  Link-time optimization across
 the Rust and C++ boundary is possible when both compilers share an LLVM
 version, but the design does not need it: the boundary is crossed once per
 table, not once per element.
@@ -1859,9 +1859,9 @@ camshaft/
 
 \begin{enumerate}
   \item The C interface gains host entry points: a run-to-completion call
-        and the individual initialise, load, run and finalise steps, each
+        and the individual initialize, load, run and finalize steps, each
         usable when the host already owns MPI.
-  \item Every binding has initialisation and finalisation hooks of its own,
+  \item Every binding has initialization and finalization hooks of its own,
         distinct from those of packages, and the library fixes their order.
   \item The library accepts a table of statically linked registration
         functions as an alternative to loading shared libraries.
@@ -1880,7 +1880,7 @@ high-performance machine, and \camshaft{} must use it.  The state of the Rust
 bindings (Section~\ref{sec:language}) matters less than it seems, for two
 reasons.
 
-First, MPI~5.0, approved in June 2025, standardises the ABI: one header and
+First, MPI~5.0, approved in June 2025, standardizes the ABI: one header and
 one set of type and constant definitions, valid for every conforming
 implementation~\cite{mpi50,mpiabi}.  MPICH has implemented it since version
 5.0.0, released in February 2026~\cite{mpich5}.  Open MPI has added it for
@@ -1981,9 +1981,9 @@ schema.  Three forms are needed.
         type~\cite{arrowcolumnar}, so it remains exportable without copying,
         and both arrays are plain fixed-width buffers that work on a device.
   \item[Implicit.]
-        In a structured block, the neighbour of cell $(i,j,k)$ is found by
+        In a structured block, the neighbor of cell $(i,j,k)$ is found by
         arithmetic.  Nothing is stored.  The schema records only the block's
-        shape, and kernels compute neighbours themselves.
+        shape, and kernels compute neighbors themselves.
 \end{description}
 
 The restriction in Section~\ref{sec:schema} therefore stands in spirit:
@@ -2001,7 +2001,7 @@ allows the infrastructure, and not each package, to do the following.
   \item \emph{Migrate.}  When rows move to another MPI rank, the rows they
         depend on can be found and sent with them, and indices translated
         between local and global numbering.
-  \item \emph{Build ghost layers.}  The rows needed from neighbouring ranks
+  \item \emph{Build ghost layers.}  The rows needed from neighboring ranks
         are those reachable through declared relations from locally owned
         rows.
   \item \emph{Validate and persist.}  Indices can be range-checked in debug
@@ -2044,7 +2044,7 @@ DMPlex's point numbering and MOAB's entity handles work.
 
 Mixed meshes also bear on risk~\ref{risk:dispatch} in Section~\ref{sec:risks}.  A mesh
 with a handful of element types is a handful of large tables, which is the
-favourable case.  A mesh partitioned into thousands of small material
+favorable case.  A mesh partitioned into thousands of small material
 regions, each a table, is not, and the model should prefer a material column
 within one table to a table per material.
 
@@ -2061,7 +2061,7 @@ There are three families, and they fit the table model to different degrees.
 
 \paragraph{Block-based.}  The mesh is a tree of blocks, all with the same
 number of cells.  This fits best.  One table holds the blocks, one row each,
-with columns for level, logical position and neighbours.  A field is a column
+with columns for level, logical position and neighbors.  A field is a column
 whose element is a fixed-size array of the block's cells, so the field data
 for all blocks is one contiguous buffer indexed by block and by cell.  That
 is precisely the packed layout Parthenon builds so that one kernel launch
@@ -2071,7 +2071,7 @@ Kokkos view.  Refinement replaces one row by $2^d$ rows.
 \paragraph{Tree-based, cell by cell.}  The mesh is the set of leaves of an
 octree or a forest of them.  One row per leaf, sorted along a space-filling
 curve, with level and position as columns, is the p4est
-representation~\cite{p4est} and is a table as it stands.  Neighbour relations
+representation~\cite{p4est} and is a table as it stands.  Neighbor relations
 are either searched for by key or stored as a relation that is rebuilt after
 each adaptation.
 
@@ -2188,7 +2188,7 @@ to its surface} during adaptation.
 
 \paragraph{It needs to read and write the standard formats.}  The file
 formats group elements into blocks by type and name boundary subsets, which
-maps directly on to tables and subsets.
+maps directly onto tables and subsets.
 
 \subsection{The mesh protocol}
 \label{sec:mesh-protocol}
@@ -2223,7 +2223,7 @@ particles, for networks, and for whatever comes later.
   \item A mesh protocol is written as a separate specification.
 \end{enumerate}
 
-None of these contradicts an earlier recommendation.  The division of labour
+None of these contradicts an earlier recommendation.  The division of labor
 is that the infrastructure understands \emph{structure} (tables, relations,
 ownership, versions) and the mesh package understands \emph{meaning}
 (topology, geometry, quality, refinement criteria).
@@ -2364,7 +2364,7 @@ close each of them.
 
 \begin{itemize}
   \item \emph{Unknown arguments are rejected.}  Lua accepts any key in a
-        table, so a misspelt argument would be ignored in silence and its
+        table, so a misspelled argument would be ignored in silence and its
         default used.  Every command rejects a key it does not declare.
         This is the most valuable single check.
   \item \emph{Undefined names are errors.}  Reading a global variable that
@@ -2444,7 +2444,7 @@ cycle on which its message is first sent.
         executes on the shadow state.  A branch that depends on the outcome
         of a run is not explored.
   \item \emph{Synthetic events are not real ones.}  A handler whose
-        behaviour depends on the state of the simulation may take a
+        behavior depends on the state of the simulation may take a
         different path in a real run from the one it took in the check.
   \item \emph{Bulk data.}  Columns cannot be validated in Lua.  Constraints
         declared on the fields of bulk types (finite, positive, within a
@@ -2487,7 +2487,7 @@ cycle on which its message is first sent.
         at each milestone.
   \item \textbf{Coupling to Kokkos.}  Designing for Kokkos packages brings
         Kokkos's constraints into the infrastructure: one Kokkos per process,
-        restricted concurrent dispatch, a single owner of initialisation, and
+        restricted concurrent dispatch, a single owner of initialization, and
         memory that must be valid for the active back end
         (Section~\ref{sec:kokkos-needs}).  These must be met without making
         Kokkos a dependency of the core, so that packages in other languages
@@ -2519,7 +2519,7 @@ cycle on which its message is first sent.
         takes seconds.  A driver is a program, so the check covers the path
         it executes and not every path.  A handler called with a synthetic
         event may behave differently from one called in a real run.  And parts of the treatment of units in Section~\ref{sec:units} are
-        untried.  A normalised system of units whose scales are computed
+        untried.  A normalized system of units whose scales are computed
         from the parameters of a run exists only once the driver has been
         evaluated, which moves some unit checks from the definition check to
         the driver check.  Conversions between systems of quantities are
@@ -2541,7 +2541,7 @@ cycle on which its message is first sent.
         explicit task graph is unresolved; the latter is easier to expose
         through a C interface.
   \item \textbf{Arrow device interface stability.}  The specification is
-        still labelled experimental~\cite{arrowcdevice}.  DLPack is the
+        still labeled experimental~\cite{arrowcdevice}.  DLPack is the
         fallback and is stable.
   \item \label{risk:build} \textbf{Build and deployment on vendor systems.}
         Rust has one production compiler and it is LLVM-based.  Linking
@@ -2549,7 +2549,7 @@ cycle on which its message is first sent.
         process and build model of Section~\ref{sec:build} has several parts
         that only a real cluster will test: Cargo linking through site
         compiler wrappers, the static configuration with vendor Fortran and
-        C++ compilers, runtime initialisation under each Fortran compiler,
+        C++ compilers, runtime initialization under each Fortran compiler,
         and the one-of-each-runtime rule in the presence of vendor OpenMP
         libraries.  None of these can be tested on freely available CI
         (Section~\ref{sec:ci}).  It should be exercised early, not assumed.
@@ -2682,7 +2682,7 @@ through every milestone from M1.
         the earlier milestones taught.  Implement it twice, for the
         unstructured and the block-based mesh, and write one small physics
         package against the protocol that runs unchanged on both where the
-        discretisation allows.
+        discretization allows.
 \end{description}
 
 Milestones M1 to M4 exercise every architectural decision that does not
@@ -2702,13 +2702,13 @@ GitHub, which determines the resources available.
 \subsection{What has to be tested}
 
 \begin{itemize}
-  \item \emph{The core's behaviour}: unit and property tests of the registry,
+  \item \emph{The core's behavior}: unit and property tests of the registry,
         store, relations and dispatch.
   \item \emph{The core's unsafe code}.  A columnar store with raw buffers and
         a foreign interface cannot avoid \code{unsafe} Rust.  Miri, which
-        interprets Rust and detects undefined behaviour~\cite{miri}, should
+        interprets Rust and detects undefined behavior~\cite{miri}, should
         run the store's tests; its support for calls into foreign code is
-        experimental and narrow, so address and undefined-behaviour
+        experimental and narrow, so address and undefined-behavior
         sanitizers are needed for tests that cross the language boundary.
   \item \emph{The stability of the C interface}.  The generated header must
         match the source, and the binary interface of each build should be
@@ -2739,7 +2739,7 @@ Runner & Resources & Use here \\
 Linux x86-64 & 4 cores, 16\,GB & The primary platform; every test that needs no GPU \\
 Linux AArch64 & 4 cores, 16\,GB & Second architecture for the store, SIMD paths and the C interface \\
 macOS, Apple silicon & 3 cores, 7\,GB & Developer platform; a second C++ and Fortran toolchain \\
-GPU (one NVIDIA T4) & 4 cores, 28\,GB & Not available: a \enquote{larger runner}, offered only to organisations on paid plans and billed per minute even for public repositories~\cite{ghlarger} \\
+GPU (one NVIDIA T4) & 4 cores, 28\,GB & Not available: a \enquote{larger runner}, offered only to organizations on paid plans and billed per minute even for public repositories~\cite{ghlarger} \\
 \bottomrule
 \end{tabularx}
 \caption{GitHub-hosted runners for a public repository.}
@@ -2774,7 +2774,7 @@ They are insufficient in three respects.
         counts say nothing about memory bandwidth, so they complement
         wall-clock measurement and do not replace it.
   \item[No cluster.]
-        One machine cannot test multi-node behaviour, scaling, vendor MPI,
+        One machine cannot test multi-node behavior, scaling, vendor MPI,
         compiler wrappers or parallel file systems.
 \end{description}
 
@@ -2814,11 +2814,11 @@ private mirror of the repository with the workstation as its runner,
 triggered only by pushes to the main branch, so that it only ever runs code
 that has already been reviewed.
 
-\paragraph{Tier 4.}  Several computing centres operate GitLab-based CI that
+\paragraph{Tier 4.}  Several computing centers operate GitLab-based CI that
 runs jobs on their production machines, using the Jacamar
 executor~\cite{ecpci}; the usual arrangement for a GitHub project is a
-mirror on the centre's GitLab.  This requires an allocation and each
-centre's approval, and centres differ in what they allow.  Until such access
+mirror on the center's GitLab.  This requires an allocation and each
+center's approval, and centers differ in what they allow.  Until such access
 exists, tier~4 is a manual campaign at each milestone, and
 risk~\ref{risk:build} stays open.
 
