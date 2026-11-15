@@ -90,6 +90,12 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+Control flow is synchronous and its order is total: commands in the order of
+the driver, the phases of a cycle in a fixed order, scheduled messages in an
+order computed from explicit constraints, and the calls of one message by
+package and by table.  A handler declares every effect it has outside
+itself, is given access to nothing else, and is run in an audit mode that
+finds what the declarations miss (Section~\ref{sec:control-flow}).
 Packages declare what they depend on, other packages and external libraries
 alike, and the dependencies form a directed graph without cycles; a package
 may compose at compile time with the packages it depends on, and reaches all
@@ -503,8 +509,8 @@ loading of a package and a check made before the run.
         (Section~\ref{sec:docs}), and validating a driver script without
         running it.
   \item \textbf{Bindings are checked once, when the package is loaded.}  A
-        compiled handler declares the columns it reads and writes, with their
-        types (Section~\ref{sec:device-memory}).  When the handler is bound,
+        handler's effects, among them the columns it reads and writes, are
+        declared in the definition (Section~\ref{sec:effects}).  When the handler is bound,
         the core checks that declaration against the schema and resolves
         names to column handles.  Nothing is looked up or checked inside a
         kernel.  A mismatch is an error at load time that names the package,
@@ -641,9 +647,13 @@ cam.param("pusher.cfl", cam.f64, { default = 0.5 })
 cam.message("pusher.advance", { schedule = "cycle" })
 
 -- The compiled handlers that answer the package's message and the core's
--- request for a limit on the time step.  Both are checked at load.
-Particle:answers("pusher.advance", cam.handler("boris"))
-Particle:answers("cam.propose_dt", cam.handler("cfl_limit"))
+-- request for a limit on the time step, each with the effects it has.
+Particle:answers("pusher.advance", cam.handler("boris", {
+  reads = { "velocity" }, writes = { "position" },
+}))
+Particle:answers("cam.propose_dt", cam.handler("cfl_limit", {
+  reads = { "velocity" },
+}))
 \end{lstlisting}
 
 The second is a driver script.
@@ -1133,7 +1143,8 @@ Two words are used with fixed meanings throughout this report.
         A function with C linkage, running on the host, that a package
         registers to answer a message for a type.  A handler is what
         dispatch calls.  It carries a declaration: the columns it reads and
-        writes, with their types and units, and the device it runs on.
+        writes, with their types and units, the device it runs on, and its
+        other effects (Section~\ref{sec:effects}).
   \item[Kernel.]
         A data-parallel loop that a handler launches, on the host or on a
         device.  Dispatch never sees inside a kernel.  Everything in it is
@@ -1200,8 +1211,13 @@ events.
         the order described below.
   \item The clock is advanced and the cycle counter is incremented.
   \item \code{cycle\_end} is emitted.
+  \item Between cycles, posted events, triggers that are due and injected
+        commands are processed.
   \item The stop conditions are tested.
 \end{enumerate}
+
+Section~\ref{sec:order} states this order, and the order within each of its
+steps, in full.
 
 The adaptation sequence of Section~\ref{sec:mesh-change} runs between
 cycles, and checkpoints are written between cycles
@@ -1240,6 +1256,10 @@ scheme.
         (Section~\ref{sec:packages}), and the driver may add constraints of
         its own.
 \end{itemize}
+
+Section~\ref{sec:constraints} gives the rules in full: how a constraint is
+stated, its two strengths, how the order is computed from the constraints,
+and what a driver may change.
 
 \paragraph{Stopping.}  \code{run} takes several stop conditions, stops at
 the first one that is met, and returns which it was, so that the driver can
@@ -1347,9 +1367,11 @@ apply where measurement shows it matters, not a second architecture.
         (Section~\ref{sec:scripts}): its payload, whether it is sent in
         every cycle (Section~\ref{sec:cycles}), and whether it returns a
         combined result.
-  \item \textbf{Binds a handler to a type} in the same script, by name.
-  \item \textbf{Writes the handler} in compiled code, with its declaration
-        of the columns it reads and writes and the device it runs on.
+  \item \textbf{Binds a handler to a type} in the same script, by name,
+        stating the handler's effects (Section~\ref{sec:effects}).
+  \item \textbf{Writes the handler} in compiled code, against the context
+        that is generated from that declaration
+        (Section~\ref{sec:undeclared}).
   \item \textbf{Registers it} from the plugin's registration function
         (Section~\ref{sec:api}).
 \end{enumerate}
@@ -1367,7 +1389,8 @@ type is called once for each record (Section~\ref{sec:records}).
 an event arrives: a command, a step of the cycle, a message from a package
   for each table whose type answers the message:            (dynamic, cached)
     choose the handler registered for the device the table is on
-    bring the columns it reads to that device, if their copies there are stale
+    prepare what the handler declared it needs: rebuilt fields, ghost rows,
+        and copies on that device, where any of them is stale
     set the floating-point environment and the logical context
     call the handler with a batch: a range of rows, their columns,
         and the attributes of the table
@@ -1378,7 +1401,9 @@ an event arrives: a command, a step of the cycle, a message from a package
 \end{lstlisting}
 
 The choice of handler is made once and kept in the call list of the event,
-so a run in steady state performs no look-ups.  The floating-point
+so a run in steady state performs no look-ups.  Section~\ref{sec:order}
+gives the order of the calls, and Section~\ref{sec:preparation} the
+preparation, in full.  The floating-point
 environment is that of Section~\ref{sec:floating-point}, the logical
 context and the collective check for errors are those of
 Section~\ref{sec:errors}, and a handler applied to part of a table is given
@@ -1440,6 +1465,623 @@ can do is write data that the host acts on once the kernel has finished.
   \item \emph{To return a value}, it stores a reduced result, such as a
         limit on the time step (Section~\ref{sec:mechanism}).
 \end{itemize}
+
+%------------------------------------------------------------------------------
+\section{Control flow}
+\label{sec:control-flow}
+
+Section~\ref{sec:dispatch} says what an event is and how a message reaches a
+handler.  This section says, as exactly as it can be said before code
+exists, in what order everything happens, what a handler is allowed to do,
+how it is known that a handler did nothing else, and how the order may be
+constrained and changed.
+
+\subsection{A synchronous loop}
+\label{sec:synchronous}
+
+The loop is synchronous.  One event is processed at a time, and a handler
+runs to completion before anything else happens on its rank.  There is no
+preemption and no interleaving.  The loop is an explicit queue in the core
+and is not built on Rust's \code{async} machinery, which settles a question
+that an earlier version of this report left open.  Running handlers that are
+independent of one another at the same time
+(Section~\ref{sec:device-memory}) remains possible later, as an optimization
+that must not change any result.
+
+\subsection{Send and post}
+\label{sec:send-post}
+
+There are two ways to raise a message, and they are different operations
+with different names.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Send.]
+        Synchronous.  The handlers of the message run now, nested inside
+        whoever sent it, and the sender continues only when all of them
+        have finished on every table.  A combined result
+        (Section~\ref{sec:mechanism}) is returned to the sender.  A failure
+        in a nested handler is returned to the sender as a status, and the
+        sender returns it in turn.
+  \item[Post.]
+        Deferred.  The event is appended to a queue and is processed at the
+        next boundary between cycles, or after the current command of the
+        driver if no cycle is running.  Posted events are processed in the
+        order in which they were posted.  Nothing is returned.
+\end{description}
+
+A message may be sent or posted by the core, by a command of the driver, or
+by a handler that has declared that it will (Section~\ref{sec:effects}).
+It goes to every table whose type answers it, unless the sender names a
+target: a table, a set of rows, or a record.
+
+\paragraph{A post is made on every rank or on none.}  Every rank must
+process the same sequence of events (Section~\ref{sec:dispatch}).  A handler
+therefore decides whether to post only from values that are the same on
+every rank: its payload, a record, a combined result.  A decision that
+depends on local data, such as whether any cell on this rank needs refining,
+is first made collective through a combined result.
+
+\subsection{The complete order}
+\label{sec:order}
+
+The order is defined level by level.  At every level it is total: nothing
+is left to the order of registration, to the order in which files were
+read, to the iteration order of a hash table, or to an address in memory.
+Every rank follows the same order.
+
+\paragraph{Level 0: the session.}  The library starts as
+Section~\ref{sec:build} describes: MPI, the bindings, then the packages in
+the order of their dependencies, each package's definitions evaluated as
+Section~\ref{sec:definition-scripts} describes.  Then the driver script
+runs.
+
+\paragraph{Level 1: the driver.}  Commands are executed in the order in
+which the script reaches them, each to completion.  After each command the
+queue of posted events is emptied.  On a restart the same order is
+reproduced by replay (Section~\ref{sec:replay}).
+
+\paragraph{Level 2: a run.}  The \code{run} command makes the pre-flight
+checks (Section~\ref{sec:preflight}) and then repeats the cycle.  A cycle
+has seven phases, always in this order.
+
+\begin{enumerate}
+  \item \code{cycle\_begin} is sent.
+  \item The time step is chosen: \code{cam.propose\_dt} is sent, its results
+        are combined by minimum, any bound from the driver is applied, and
+        the result is written to the clock (Section~\ref{sec:cycles}).
+  \item The scheduled messages are sent, in the order that the constraints
+        give (Section~\ref{sec:constraints}).
+  \item The clock is advanced and the cycle counter is incremented.
+  \item \code{cycle\_end} is sent.
+  \item Between cycles: first the posted events, in the order posted,
+        including any they post in turn; then the triggers that are due, in
+        the order in which they were registered; then any batch of commands
+        that was injected (Section~\ref{sec:modification}).  Adaptation of a
+        mesh and the writing of a checkpoint happen here and nowhere else.
+  \item The stop conditions are tested, collectively.
+\end{enumerate}
+
+\paragraph{Level 3: one message.}  Whoever raised it, a message is processed
+in the same way.
+
+\begin{enumerate}
+  \item \emph{The calls to be made are determined}: every pair of a handler
+        bound to the message and a table of the handler's type, within the
+        target if one was named.
+  \item \emph{The calls are ordered,} first by handler and then by table.
+        Handlers are ordered by package, a package after every package it
+        depends on, and packages that do not depend on one another by name;
+        within a package, by the name of the type.  The tables of a type are
+        ordered by name.  One package thus finishes its work on every table
+        before the next begins.
+  \item \emph{Each call is made}: the data the handler declared it needs is
+        prepared (Section~\ref{sec:preparation}); the floating-point
+        environment and the logical context are set; the handler is called;
+        its kernels complete; the columns it declared it writes are marked
+        as current where it ran, and their versions are advanced.
+  \item \emph{Handlers written in Lua} that are attached to the message are
+        called, in the order in which they were registered.
+  \item \emph{The results are combined,} over the tables of a rank and then
+        over ranks, in one reduction, and returned to the sender.
+  \item \emph{Errors are examined.}  A nested send returns a failure to its
+        sender at once.  The collective examination of
+        Section~\ref{sec:errors} is made when the outermost event completes,
+        which is what \enquote{the boundary between events} means in that
+        section.
+\end{enumerate}
+
+Two handlers of one message that belong to packages with no dependency
+between them, and that write a column the other reads or writes, are in
+conflict.  The definition check reports the conflict, unless the message
+declares that its handlers accumulate, as the contributions to a source
+term do.  They are then called in the order above, which is fixed, so that
+the result is reproducible though it depends on that order in its last
+bits.
+
+\paragraph{Level 4: inside a handler.}  The order of a handler's own work is
+its own.  What it raises is ordered by rule: a send is processed completely,
+depth first, before the handler continues, and a post waits in the queue.
+Kernels that a handler launches have completed before it returns.
+
+\paragraph{Level 5: inside a kernel.}  There is no order.  A kernel is a
+data-parallel loop, and its result must not depend on the order of its
+iterations, except in the last bits of a reduction
+(Section~\ref{sec:reproducibility}).
+
+\paragraph{Across ranks.}  Every rank passes through levels 0 to 4 in the
+same sequence.  Ranks meet only at collective points: the reduction that
+combines results, the exchange of ghost rows during preparation, and the
+MPI calls of a collective handler (Section~\ref{sec:handler-mpi}).
+
+\paragraph{An example.}  Package C depends on package A.  A schedules
+\code{a.advance}, whose handler sends \code{a.source}; C answers
+\code{a.source} and schedules \code{c.relax} after \code{a.advance}; there
+are two tables, \code{t1} and \code{t2}.
+
+\begin{lstlisting}
+cycle 12
+  cycle_begin
+  cam.propose_dt   a.limit(t1) a.limit(t2) c.limit(t1) c.limit(t2)  -> minimum
+  a.advance        a.advance(t1)
+                     send a.source -> c.source(t1)        nested, synchronous
+                   a.advance(t2)
+                     send a.source -> c.source(t2)
+  c.relax          c.relax(t1) c.relax(t2)                after a.advance
+                     post a.rebuild                       queued
+  clock advanced; the cycle counter becomes 13
+  cycle_end        handlers written in Lua
+  between cycles   a.rebuild                              posted earlier
+  stop conditions tested
+\end{lstlisting}
+
+\subsection{Preparation before a call}
+\label{sec:preparation}
+
+Nothing implicit happens at a fixed phase.  Whatever the core does on a
+package's behalf, it does immediately before the first handler that declared
+a need for the result.  Before each call, in this order:
+
+\begin{enumerate}
+  \item derived fields, generated look-up tables and analytic fields that
+        the handler reads are rebuilt, if what they were built from has
+        changed (Sections~\ref{sec:checkpoint-holds}, \ref{sec:records}
+        and~\ref{sec:expressions}); a rule for rebuilding that is itself a
+        handler is called as a nested send;
+  \item the ghost rows of columns that the handler declared it reads at
+        ghosts are exchanged, if their owners have written them since the
+        last exchange (Section~\ref{sec:mesh});
+  \item the columns the handler reads are copied to the device it runs on,
+        if the copies there are stale (Section~\ref{sec:device-memory}).
+\end{enumerate}
+
+An analytic field that is refreshed in every cycle is evaluated for the
+time at which the cycle starts, before its first reader in that cycle.
+
+Whether something is stale is decided from the \emph{declarations} of the
+handlers that have run, and not from whether the data in fact changed.
+Staleness is therefore the same on every rank, and so is the decision to
+make a collective exchange.
+
+\subsection{What a handler may do}
+\label{sec:effects}
+
+A handler may do a great deal more than wrap columns and launch kernels.  It
+may run an algorithm on the host, iterate until something converges, change
+the structure of tables, raise messages, and call a library that uses MPI.
+The condition is that it \emph{declares its effects}.  An effect is anything
+a handler does that is visible outside it.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{46mm} L@{}}
+\toprule
+Effect & What the declaration states \\
+\midrule
+Reads a column & The column; whether it is read at ghost rows as well as owned ones \\
+Writes a column & The column \\
+Reads or writes a record, or the attributes of a table & The fields \\
+Changes structure: creates or deletes rows, creates a table & The types whose tables it may change \\
+Sends a message & The message, and any column of its own that it hands over while the send is in progress (Section~\ref{sec:recursion}) \\
+Posts a message & The message \\
+Uses MPI collectively & That it is collective (Section~\ref{sec:handler-mpi}) \\
+Calls an external library & The library, which is a declared requirement of the package (Section~\ref{sec:packages}) \\
+Performs input or output of its own & That it does, and whether on every rank \\
+Runs on a device & The device, or that it runs on the host only \\
+\bottomrule
+\end{tabularx}
+\caption{The effects of a handler, each of which must be declared.}
+\label{tab:effects}
+\end{table}
+
+Work that has no effect outside the handler needs no declaration: an
+algorithm on the host, a loop that runs until it converges, temporary
+memory.
+
+\paragraph{Where effects are declared.}  In the package's definition, beside
+the binding of the handler, and not in the compiled code.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+Particle:answers("pusher.advance", cam.handler("boris", {
+  reads  = { "velocity" },
+  writes = { "position" },
+  sends  = { "pusher.source" },
+}))
+\end{lstlisting}
+
+The definition is then the one source of truth for effects as it is for
+types (Section~\ref{sec:scripts}).  The effects are known when the
+definition is checked, offline, before any plugin has been built or loaded.
+And the compiled code cannot state anything different, because what it is
+given is generated from the declaration (Section~\ref{sec:undeclared}).  A
+Rust package compiled into the core is the one exception: its handlers'
+effects are derived from the types of their parameters, as Bevy's systems
+take their access to data from theirs~\cite{bevyecs}, and so cannot disagree
+with the code either.
+
+\paragraph{Effects are transitive.}  The effects of a handler include those
+of every handler of every message it sends.  The core computes the closure
+when the definitions have been read, and it is the closure that is used
+wherever effects matter: in deciding what must be ordered
+(Section~\ref{sec:constraints}) and what must be prepared
+(Section~\ref{sec:preparation}).
+
+\paragraph{What no declaration permits.}  A handler never does any of the
+following.
+
+\begin{itemize}
+  \item Terminates the process (Section~\ref{sec:errors}).
+  \item Installs a signal handler, or leaves the floating-point environment
+        changed (Sections~\ref{sec:build} and~\ref{sec:floating-point}).
+  \item Initializes or finalizes MPI, Kokkos or another runtime; that is the
+        work of the hooks of Section~\ref{sec:build}.
+  \item Calls into Lua.
+  \item Defines a type, or binds a handler.
+  \item Reaches data otherwise than through the batch it was given.
+  \item Keeps the batch, or a view of a column, after it returns.
+  \item Uses the world communicator of MPI, or leaves communication in
+        flight when it returns.
+  \item Leaves a thread running when it returns.
+  \item Calls another package's handler directly, and not through a send.
+\end{itemize}
+
+\subsection{MPI and external libraries in handlers}
+\label{sec:handler-mpi}
+
+Section~\ref{sec:mpi} keeps the exchange of declared columns inside the
+store.  A package that uses a distributed solver, however, uses MPI through
+that solver, and the design must allow it.
+
+\begin{itemize}
+  \item \emph{The communicator is supplied by the library.}  A handler that
+        declared itself collective obtains a communicator from its batch,
+        a duplicate kept for its package.  It never uses the world
+        communicator, because the host may own MPI and may have given
+        \camshaft{} only part of the job (Section~\ref{sec:build}).
+  \item \emph{A collective handler is called on every rank,} including a
+        rank that holds no rows of the table, which receives an empty batch.
+        A collective call that some ranks did not make would never return.
+  \item \emph{Nothing is left in flight.}  Every request a handler starts is
+        complete when it returns.
+  \item \emph{The level of thread support} a package needs is declared, and
+        the library asks MPI for the highest that any loaded package
+        requires (Section~\ref{sec:build}).
+  \item \emph{Errors.}  \camshaft{} sets its communicators to return errors
+        and not to abort, so that an error from MPI inside a handler can be
+        reported as an error of the handler (Section~\ref{sec:errors}).
+\end{itemize}
+
+A library's own data structures are the handler's business.  It fills them
+from the columns it declared it reads and copies results into the columns
+it declared it writes.
+
+\subsection{Detecting undeclared effects}
+\label{sec:undeclared}
+
+A declaration is worth only as much as the assurance that it is true.  An
+effect that is not declared is an error, and the design sets out to find
+every such error, as early as it can be found (\ref{req:early}), by five
+means that overlap on purpose.
+
+\paragraph{1. By construction.}  The first defense is that an undeclared
+effect cannot be expressed.  A handler reaches data and services only
+through its batch, and from the declaration the tools generate, for each
+handler, a context type that offers exactly what was declared and nothing
+else.
+
+\begin{itemize}
+  \item There is an accessor for each column the handler declared, and for
+        no other.  Naming a column that was not declared does not compile.
+  \item A column declared as read arrives as a view of constant elements.
+        Writing to it does not compile.
+  \item There is a function to send or post each message that was declared,
+        and to create or delete rows of each type that was declared.
+  \item The communicator is offered only to a handler declared collective.
+  \item A view carries the memory space of the device that was declared, so
+        that Kokkos rejects its use from code compiled for another.
+\end{itemize}
+
+This holds in every language for which a header or module is generated.
+Through the plain C interface, where fields are named by strings, the same
+requests are refused when they are made, at the first call.
+
+\paragraph{2. When the definitions are checked.}  Because effects are in the
+definition, the whole graph of who raises what is known offline.  The
+definition check reports a message that is sent and has no handler; a
+handler declared for a device that its package does not build for; a cycle
+of sends that is not marked as recursive (Section~\ref{sec:recursion}); two
+handlers in conflict with no constraint between them
+(Section~\ref{sec:constraints}); and a nested handler that would write what
+its sender holds (Section~\ref{sec:recursion}).
+
+\paragraph{3. When a plugin is loaded.}  The generated declarations are part
+of the description whose hash the plugin records
+(Section~\ref{sec:definition-scripts}), so a plugin built from other
+declarations is refused.  The core also examines the plugin as a binary.  A
+shared library lists the libraries it needs and the symbols it imports.  A
+plugin that imports MPI without a collective handler, that needs a library
+its package did not declare, or that imports the functions by which a
+process is terminated, a signal handler installed or a runtime initialized,
+is refused, or reported where the import can be innocent.  The same
+examination is available to the check invocation, so that it can be made on
+a login node, and to the build of the static configuration.
+
+\paragraph{4. In audit mode.}  Some effects can bypass the interface: a write
+through a pointer that was obtained properly, an MPI call made directly, a
+change to the process.  \emph{Audit mode} is a way of running, slower than
+the normal one, that detects them.
+
+\begin{itemize}
+  \item \emph{Columns are relocated and protected.}  For each call the
+        handler is given the columns it declared in freshly mapped memory,
+        with those it declared only to read protected against writing, and
+        every other column of the store made inaccessible.  A write to a
+        column declared as read, or any access to a column not declared,
+        stops the program at the instruction that made it, and the report
+        of the fault (Section~\ref{sec:errors}) names the place.  Because
+        the memory is fresh at each call, a pointer kept from an earlier
+        call fails in the same way.
+  \item \emph{Buffers are guarded.}  Inaccessible pages on either side of
+        each column catch an access beyond its ends.
+  \item \emph{MPI is intercepted.}  The profiling interface that the MPI
+        standard provides~\cite{mpi50} lets \camshaft{} see every MPI call.
+        It reports a call from a handler that is not collective, a call on a
+        communicator that \camshaft{} did not supply, and a request still
+        in flight when a handler returns.
+  \item \emph{The process is compared before and after each call}: the
+        signal handlers installed, the threads running, the files open, the
+        floating-point environment.
+  \item \emph{The sequence of events is compared across ranks} after every
+        event, and not at intervals (Section~\ref{sec:strict}).
+  \item \emph{Declarations that are too wide are reported.}  A column
+        declared as written that no test changed, or a message declared as
+        sent that was never sent, is a warning.  Wide declarations are safe
+        but cost ordering constraints and copies that were not needed.
+\end{itemize}
+
+On a device, memory cannot be protected.  There the columns a handler did
+not declare are filled with values that are not numbers before the call, so
+that a kernel which reads one produces a result that the scan of
+Section~\ref{sec:floating-point} finds, and the columns it did not declare
+it writes are compared with a checksum taken before the call.
+
+Audit mode is a variant that the harness derives from every test script
+(Section~\ref{sec:harness}), and the gate on dispatch coverage is that every
+handler a package ships has been called in audit mode, on each device it
+supports.  A user may also ask for audit mode on any run.
+
+\paragraph{5. In every run.}  Some checks are cheap enough to be made
+always: the refusals of the interface under the first heading; the
+floating-point environment after each call; the rule against re-entering a
+handler and the limit on depth (Section~\ref{sec:recursion}); and the
+comparison of the sequence of events across ranks, at intervals.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{40mm} L L@{}}
+\toprule
+Undeclared effect & Earliest point at which it is found & Backstop \\
+\midrule
+Access to a column not declared & Compilation, through the generated context & Audit mode: the access faults \\
+Write to a column declared as read & Compilation: the view is constant & Audit mode: the write faults \\
+Send or post of a message not declared & Compilation, or the first call through the C interface & None is needed: there is no other way to raise a message \\
+Change of structure not declared & Compilation, or the first call & None is needed \\
+MPI without a collective declaration & Loading: the plugin imports MPI & Audit mode: the call is intercepted \\
+Use of the world communicator; communication left in flight & Audit mode & The comparison of events across ranks \\
+A library not declared & Loading: the plugin needs it & \\
+Termination, signal handlers, initializing a runtime & Loading: the import & Audit mode: the process is compared \\
+A view kept after the call & Audit mode: its memory is gone & The address sanitizer variant of the tests \\
+State kept outside the store & The restart test (Section~\ref{sec:replay}) & \\
+\bottomrule
+\end{tabularx}
+\caption{Where each kind of undeclared effect is found.}
+\label{tab:undeclared}
+\end{table}
+
+\paragraph{What remains.}  Audit mode finds an undeclared effect only on a
+path that a test executes, which is why coverage in audit mode is a gate.
+On a device an undeclared read of an integer column is not found, since
+there is no value that marks an integer as invalid.  And a plugin that links
+a library statically hides it from the examination at load.
+
+\subsection{Constraints and the schedule}
+\label{sec:constraints}
+
+The scheduled messages of a cycle are sent in an order that is computed from
+constraints.  This subsection says how constraints are stated and exactly
+how the order follows from them.
+
+\paragraph{How a constraint is stated.}  A constraint says that one
+scheduled message comes after, or before, another.  It is stated where a
+message is declared.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.message("c.relax",   { schedule = "cycle", after = "a.advance" })
+cam.message("c.smooth",  { schedule = "cycle", after = "c.relax", strength = "default" })
+cam.message("c.monitor", { schedule = "cycle", within = "a.phase.update", optional = true })
+\end{lstlisting}
+
+\begin{itemize}
+  \item \emph{What may be named.}  A package constrains its own messages,
+        relative to its own, to those of packages it depends on, and to
+        anchors those packages publish.  It may not constrain two messages
+        that are both foreign to it.  Cactus schedules its routines in the
+        same way, each stating that it runs before or after
+        another~\cite{cactusguide}.
+  \item \emph{Anchors.}  A package or a protocol may publish named points in
+        the cycle, in a stated order, and a message may be placed within
+        one.  An anchor lets a package take its place in a cycle without
+        naming any other package's messages, and it is how a family of
+        packages gives its cycle a structure without the core knowing of it
+        (Section~\ref{sec:packages}).  Placing a message within an anchor is
+        a pair of constraints: after its beginning and before its end.
+  \item \emph{Strength.}  A constraint is \emph{required} or it is a
+        \emph{default}.  A required constraint states that the other order
+        is wrong, and nothing overrides it.  A default states the order the
+        package recommends, and the driver may replace it.  A constraint is
+        required unless it says otherwise.
+  \item \emph{Optional messages.}  A package may mark a scheduled message as
+        optional, which allows the driver to switch it off.
+  \item \emph{A name must exist.}  A constraint that names a message or an
+        anchor which no declared dependency defines is an error.  A
+        constraint that names one which is defined but absent, because it
+        was switched off, has no effect.
+\end{itemize}
+
+\paragraph{How the order follows.}  The schedule is computed in six steps,
+when the definitions have been read and again whenever a package is loaded
+or the driver changes a constraint.
+
+\begin{enumerate}
+  \item The scheduled messages that are active are collected.
+  \item A directed graph is formed, with an edge for every required
+        constraint and for every default constraint that the driver has not
+        replaced, and for the driver's own.
+  \item A cycle in the graph is an error, reported with the constraints
+        that make it.  A package whose default contradicts a required
+        constraint is in error; a driver whose constraint does so is in
+        error.
+  \item \emph{Every conflict must be ordered.}  Two messages conflict when
+        the effects of one, taken with everything it sends, include writing
+        a column, or changing a table, that the other reads, writes or
+        changes.  For every pair in conflict the graph must contain a path
+        from one to the other.  A pair without one is an error, reported
+        with the columns in conflict.  This is the rule that makes an
+        omitted constraint an error in place of an accident.
+  \item The messages are placed in an order consistent with the graph.
+        Where the graph leaves two messages unordered they are, by the
+        fourth step, independent of each other, and they are placed in
+        order of their qualified names.
+  \item The resulting sequence is fixed until something changes it.  The
+        check invocation prints it.  It is recorded in every checkpoint, and
+        a restart that computes a different one is an error unless the
+        difference comes from a recorded command of the driver
+        (Section~\ref{sec:replay}).
+\end{enumerate}
+
+Constraints order the scheduled messages of a cycle and nothing else.  The
+order of calls within one message is that of Section~\ref{sec:order}, and a
+nested send happens where its sender makes it.
+
+\paragraph{What a driver may change.}
+
+\begin{itemize}
+  \item It may replace a default constraint, and add constraints between any
+        two messages.
+  \item It may switch off a message that its package marked as optional.
+  \item It may not break a required constraint, or leave a conflict
+        unordered.
+\end{itemize}
+
+Each change is a command.  It is checked before the run like any other,
+takes effect at the next boundary between cycles, and is recorded in the
+journal.  One further power is deferred: letting a driver state the sequence
+of a cycle outright, with a message appearing more than once, which is how
+a scheme of operator splitting would be chosen.
+
+\subsection{Recursion}
+\label{sec:recursion}
+
+Because a send is synchronous, a handler that sends a message may cause
+itself to be called again, directly or through others.  Some of this is
+wanted.  Advancing a refined level of a mesh from inside the advance of the
+coarser one, several times with a smaller time step, is recursion of exactly
+this kind, and so is a cycle of a multigrid solver.  The interval of time
+of a nested send travels in its payload; the clock of the core describes the
+outer cycle only (Section~\ref{sec:cycles}).
+
+\begin{itemize}
+  \item \emph{Recursion is allowed across tables and never on one.}  A
+        handler that is active on a table is not entered again on that
+        table.  The dispatcher keeps the set of calls in progress and
+        refuses a second entry with an orderly error, which names the chain
+        of sends from the logical context (Section~\ref{sec:errors}).
+        Recursion that descends a finite hierarchy of tables therefore
+        terminates.
+  \item \emph{Depth is limited.}  A limit on the depth of nesting, which the
+        driver may raise, stops what the first rule does not.
+  \item \emph{Recursion is declared.}  The graph of sends is known from the
+        declarations.  A cycle in it is an error at the definition check
+        unless the messages on it are marked as recursive, so that
+        recursion nobody intended is found before anything runs.
+  \item \emph{A sender's columns are its own while it waits.}  A handler
+        nested beneath another may not write a column that a handler above
+        it in the chain declared it reads or writes, since the one above
+        still holds views of it.  The exception is a column that the sender
+        hands over in the declaration of the send.  After such a send the
+        sender's views of that column are no longer valid and it obtains
+        them again.  The definition check applies this rule from the
+        declarations, and audit mode enforces it, since relocation
+        invalidates the old views.
+  \item \emph{A handler's kernels are complete before it sends,} so that
+        what a nested handler reads is current.
+  \item \emph{Handlers written in Lua do not start cycles.}  A command that
+        drives the loop, such as \code{run}, is refused inside a handler.
+\end{itemize}
+
+Iteration that needs no nesting is better expressed by a loop inside a
+handler, or by a post.
+
+\subsection{What can be seen}
+\label{sec:visibility}
+
+What happens inside a handler is its package's affair, and what happens
+inside a library is the library's.  At the level of handlers nothing is
+hidden, from a package developer or from a user, because every effect is
+declared.
+
+\begin{itemize}
+  \item \emph{Before a run,} the check invocation prints the schedule that
+        was computed: the phases of a cycle, each message in order, its
+        handlers, their tables and devices, their effects, and the sends
+        nested beneath them.
+  \item \emph{During a run,} the dispatcher sees every call.  The time spent
+        in each handler, with and without what it sent, and a trace of
+        events, are available without anything being added to a package.
+  \item \emph{When a package is loaded,} an effect that the definition does
+        not declare is an error.
+\end{itemize}
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item The loop is synchronous and is an explicit queue.
+  \item The C interface distinguishes sending a message from posting one.
+  \item The order of everything above the inside of a handler is total and
+        is fixed by names and dependencies.
+  \item Preparation is driven by declarations and happens immediately
+        before the call that needs it.
+  \item Effects are declared in the definition; a context generated for
+        each handler offers only what was declared.
+  \item A plugin is examined as a binary when it is loaded.
+  \item There is an audit mode, and coverage in it is a gate.
+  \item A handler may use MPI collectively, on a communicator that
+        \camshaft{} supplies, and is then called on every rank.
+  \item Constraints have two strengths; conflicts must be ordered; the
+        schedule is printed and recorded.
+  \item Recursion is permitted across tables, declared, and bounded.
+\end{enumerate}
 
 %------------------------------------------------------------------------------
 \section{Hardware portability}
@@ -1731,7 +2373,9 @@ argument.
   \item \textbf{The declaration.}  Each handler is registered with a
         declaration, as plain data: every column it reads and writes, with
         its element type, shape, unit and device
-        (Section~\ref{sec:handlers}).  The core compares the declaration
+        (Section~\ref{sec:handlers}).  The declaration is generated from
+        the package's definition, which is where a handler's effects are
+        stated (Section~\ref{sec:effects}).  The core compares the declaration
         with the schema and resolves the names to column handles, once.  A
         mismatch is an error that names the package, the type and the
         field.
@@ -2527,8 +3171,10 @@ MPI that an infrastructure layer needs (communicators, non-blocking
 point-to-point, collectives, and parallel I/O via a library) is small enough
 to bind directly.
 
-Second, the design already hides MPI.  Packages do not call MPI; they declare
-which columns are exchanged, and the store performs the exchange.  MPI
+Second, the design already hides MPI.  Packages do not call MPI to exchange
+their data; they declare which columns are exchanged, and the store performs
+the exchange.  A handler that uses a distributed library may use MPI
+collectively, on the terms of Section~\ref{sec:handler-mpi}.  MPI
 therefore sits behind one internal interface and could be supplemented later
 by another transport without affecting packages.
 
@@ -3601,12 +4247,12 @@ They are gathered here because they are one policy.
 Stage & What is checked & What it needs \\
 \midrule
 Compilation & In the core, memory errors and data races, by the Rust compiler.  In packages, the names and types of fields, through the header generated from the definitions (Section~\ref{sec:scripts}) & Compilers only \\
-Definition check & Names; namespaces and ownership; that the dependencies between packages form no cycle and their version requirements can be met; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
+Definition check & Names; namespaces and ownership; a message that is sent and has no handler, an unmarked cycle of sends, and two handlers or messages in conflict that nothing orders (Section~\ref{sec:control-flow}); that the dependencies between packages form no cycle and their version requirements can be met; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
-Loading a package & Each handler's declared columns, with their types and units, against the schema; the versions of the packages it was compiled against; the hash of the package's description; the interface version; duplicated runtimes & The compiled plugin \\
+Loading a package & Each handler's declared columns, with their types and units, against the schema; the versions of the packages it was compiled against; the hash of the package's description; the libraries and symbols the plugin imports, against what it declared; the interface version; duplicated runtimes & The compiled plugin \\
 Driver check & The arguments of every command; references to tables, records and names; that files exist; that every dataset is found and passes its package's probe; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
 Pre-flight & That every record is complete; that every message which will be sent has a handler for the device each of its tables is on; that exchange plans can be built; that datasets can be read from the compute nodes; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
-During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
+During the run & Undeclared effects, in audit mode; re-entry of a handler and the depth of nesting; index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
 \bottomrule
 \end{tabularx}
 \caption{Stages of checking, earliest first.}
@@ -4179,11 +4825,20 @@ remedy is the one already applied to signal handlers
         operations on a device can be provided without the core acquiring a
         GPU kernel technology of its own.  A mesh is therefore the test
         problem at every milestone.
-  \item \textbf{Asynchrony.}  An event-driven core invites asynchronous
-        execution, and GPU work is inherently asynchronous.  Whether the event
-        loop should be built on Rust's \code{async} machinery or on a simpler
-        explicit task graph is unresolved; the latter is easier to expose
-        through a C interface.
+  \item \textbf{Concurrency.}  The loop is synchronous
+        (Section~\ref{sec:synchronous}), which leaves performance unclaimed:
+        handlers that are independent could run at the same time, and
+        kernels on a device could overlap.  Whether either can be added
+        without disturbing the order of Section~\ref{sec:order} is untested.
+  \item \textbf{Declared effects.}  Section~\ref{sec:effects} asks package
+        developers to declare everything a handler does, and
+        Section~\ref{sec:undeclared} promises to find what they omit.  Three
+        parts of that are unproven.  Whether developers will keep
+        declarations narrow, when wide ones are easier and still pass.
+        Whether relocating and protecting columns at every call is
+        affordable even in tests, and compatible with every Kokkos back
+        end.  And whether examining a plugin's imports gives few enough
+        false alarms to be a refusal and not merely a warning.
   \item \textbf{Arrow device interface stability.}  The specification is
         still labeled experimental~\cite{arrowcdevice}.  DLPack is the
         fallback and is stable.
@@ -4256,7 +4911,11 @@ through every milestone from M1.
         with cached call lists.  The run loop of Section~\ref{sec:cycles}:
         the cycle counter, the clock, messages with combined results, the
         time-step proposal, the ordering of scheduled messages by explicit
-        constraints, and stop conditions, absolute and relative.
+        constraints, and stop conditions, absolute and relative.  Control
+        flow as Section~\ref{sec:control-flow} defines it: send and post,
+        the complete order, declared effects and their closure, constraints
+        of two strengths with anchors, the rule against re-entry, and the
+        schedule printed by the check invocation.
         The pre-flight checks before the first cycle.  The error function,
         the logical context kept by the dispatcher, the report, and exit
         codes (Section~\ref{sec:errors}).  Table version counters and invalidation of
@@ -4310,7 +4969,11 @@ through every milestone from M1.
         versions refused at load.  A package whose definition is divided among
         several scripts (Section~\ref{sec:definition-scripts}); a plugin
         built from definitions that have since changed is refused by its hash
-        (Section~\ref{sec:type-checking}).  Errors declared in a definition script and raised from
+        (Section~\ref{sec:type-checking}).  The context generated for each
+        handler, in which an undeclared effect does not compile; the
+        examination of a plugin's imports at load; audit mode on the host,
+        with columns relocated and protected
+        (Section~\ref{sec:undeclared}).  Errors declared in a definition script and raised from
         C++ and Fortran; the three floating-point profiles in the installed
         CMake configuration, the environment set and restored around each
         handler, traps in the strict profile, and the profile variant of
@@ -4344,6 +5007,7 @@ through every milestone from M1.
         route for Rust packages.
         \emph{Containers:} whether a runtime image for the back end in use
         is worth making (Section~\ref{sec:containers}).
+        \emph{Effects:} audit mode on the device.
         \emph{Errors:} a check inside a kernel on the device that names
         the failing row; the scan of written columns on the device.
         \emph{Expressions:} the evaluator of
@@ -4360,7 +5024,9 @@ through every milestone from M1.
         (Section~\ref{sec:checkpoint}): the journal, the two kinds of
         command, a modification script applied at a restart and replayed at
         the next, restart on a different number of ranks, and the restart
-        test.  A dataset read on one rank and distributed, held once for
+        test.  A collective handler that uses MPI through a library, called
+        on a rank with no rows, with MPI intercepted in audit mode
+        (Section~\ref{sec:handler-mpi}).  A dataset read on one rank and distributed, held once for
         each node, and verified by its hash at a restart.  An error on one
         rank stopping all ranks at the same event,
         with one merged report.  An ensemble test of one chaotic example,
@@ -4497,6 +5163,8 @@ anything more being written.
         Section~\ref{sec:sanitizers}.
   \item \emph{Profile}: the release and fast floating-point profiles against
         the strict one, within tolerance (Section~\ref{sec:reproducibility}).
+  \item \emph{Audit}: the script in audit mode, in which an effect that a
+        handler did not declare is an error (Section~\ref{sec:undeclared}).
 \end{itemize}
 
 \subsection{Kinds of testing}
@@ -4548,7 +5216,7 @@ terms are worth more.
   \item \emph{Dispatch coverage.}  The registry holds every entry of the
         dispatch table: every handler, for every type and every device
         (Section~\ref{sec:dispatch}).  The harness reports the entries that
-        no test called.  For the handlers a package ships, this one is a
+        no test called in audit mode (Section~\ref{sec:undeclared}).  For the handlers a package ships, this one is a
         gate.
   \item \emph{Coverage of errors.}  Every error of validation has an
         identifier (Section~\ref{sec:strict}), and a test that expects a
@@ -5050,6 +5718,9 @@ Scripts & Definition scripts owned by packages and driver scripts owned by users
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
 Configuration objects & Records: same schema as bulk types, stored on the host and replicated on every rank; fixed-width fields reach kernels by value or through generated look-up tables; tables carry a record of attributes \\
 Dispatch & Dynamic per table through a (message, type, device) table, as far as the handler, which is a host function; static within the kernels a handler launches; a kernel on a device neither is a handler nor calls one \\
+Control flow & A synchronous loop; a message is sent (nested, now) or posted (deferred to the boundary between cycles); the order is total at every level and fixed by names and dependencies; implicit work is done immediately before the handler that needs it; recursion is allowed across tables, declared, and bounded \\
+Handler effects & Everything a handler does outside itself is declared in the definition; a generated context offers only what was declared; undeclared effects are found at compilation, at load by examining the plugin, and in an audit mode that every shipped handler must be tested under \\
+Constraints & Required or default; stated relative to a package's own messages, its dependencies' and published anchors; every pair of messages in conflict must be ordered; the driver may replace defaults and switch off optional messages; the schedule is printed and recorded \\
 Run loop & A cycle counter owned by the core as the primary measure of progress; messages within a cycle ordered by explicit constraints, never by the order of declaration; simulation time as an optional clock; the time step chosen each cycle as the minimum of the packages' proposals; several stop conditions, absolute and relative, with the one that fired returned to the driver \\
 GPU strategy & The infrastructure owns memory and scheduling; handlers are opaque and their kernels may come from any toolchain \\
 Meshes & Tables plus declared relations (fixed and offsets-and-indices), index spaces across element types, table versions and transfer maps for adaptation, one ghost-to-owner communication primitive; mesh semantics in a separate protocol, not in the core \\
