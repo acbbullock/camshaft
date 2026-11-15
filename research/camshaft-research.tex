@@ -85,6 +85,11 @@ a library with a trivial \code{main}, so that it can be hosted by its own
 executable, by a statically linked application, or by Python or Julia; the
 core is built with Cargo, and bindings and packages in C++ and Fortran with
 CMake against an installed library (Section~\ref{sec:build}).
+A checkpoint holds the schema, the data and a journal of the commands
+executed; a run is restarted by replaying its own driver script against that
+journal, may be modified at a restart by further scripts that become part of
+its record, and may equally be started from a database file prepared by
+another program (Section~\ref{sec:checkpoint}).
 Formulas that a user writes in a driver script are captured as symbolic
 expressions, checked for dimensional consistency before the run and
 evaluated into columns without Lua (Section~\ref{sec:expressions}).
@@ -494,7 +499,9 @@ loading of a package and a check made before the run.
         an added column disturbs none of them.  Nobody may change or remove
         a field of a type they do not own once objects of it exist, and the
         owner does so only through the schema version and a migration
-        (Section~\ref{sec:schema-record}).
+        (Section~\ref{sec:schema-record}).  The owner of a type also decides
+        whether a driver may create and delete its rows directly, or only
+        through the package's own commands (Section~\ref{sec:modification}).
   \item \textbf{Modes belong to the invocation, not to the script.}  The
         executable, and the library entry points beneath it
         (Section~\ref{sec:build}), offer at least four: run a driver; check
@@ -710,8 +717,12 @@ package through the API.  For each type the registry should record:
   \item for the type and for each field, the documentation text its author
         supplied (Section~\ref{sec:docs});
   \item for each field, placement and life-cycle metadata: whether it lives
-        on the host, on a device, or both; whether it is checkpointed; whether
-        it is exchanged between MPI ranks;
+        on the host, on a device, or both; its persistence class, which is
+        state, derived or scratch (Section~\ref{sec:checkpoint-holds});
+        whether it is exchanged between MPI ranks; and whether its value may
+        change after a run has started;
+  \item for the type, whether a driver may create and delete its rows
+        directly (Section~\ref{sec:modification});
   \item a schema version, so that old checkpoints can be migrated.
 \end{itemize}
 
@@ -988,7 +999,7 @@ package-specific code, and the same holds for records, which are written
 with the tables they configure.  HDF5 and ADIOS2 are the obvious targets; both are C
 libraries with C interfaces.  Checkpoint and restart should be designed with
 the store, not added afterward, because schema versioning is much easier to
-build in than to retrofit.
+build in than to retrofit.  Section~\ref{sec:checkpoint} gives that design.
 
 %------------------------------------------------------------------------------
 \section{Events and dispatch}
@@ -1072,7 +1083,8 @@ events.
 \end{enumerate}
 
 The adaptation sequence of Section~\ref{sec:mesh-change} runs between
-cycles.  Before the first cycle of a run the core makes the pre-flight
+cycles, and checkpoints are written between cycles
+(Section~\ref{sec:checkpoint}).  Before the first cycle of a run the core makes the pre-flight
 checks of Section~\ref{sec:preflight}, so that what can be known to be wrong
 is reported then and not at the cycle where it would first be used.
 
@@ -2196,7 +2208,8 @@ to its surface} during adaptation.
 
 \paragraph{It needs to read and write the standard formats.}  The file
 formats group elements into blocks by type and name boundary subsets, which
-maps directly onto tables and subsets.
+maps directly onto tables and subsets.  Section~\ref{sec:interchange}
+describes how a mesh produced by another program is brought in.
 
 \subsection{The mesh protocol}
 \label{sec:mesh-protocol}
@@ -2516,7 +2529,8 @@ other.  The output records where in the script the function was given,
 since there is no formula to record.
 
 A user for whom neither an expression nor this fill will do can compute the
-values elsewhere and import them, from a file or with Python as the host
+values elsewhere and import them, from a database file
+(Section~\ref{sec:interchange}) or with Python as the host
 (Section~\ref{sec:build}), or can supply a compiled kernel in a package.
 
 \subsection{Consequences for the design}
@@ -2538,6 +2552,302 @@ values elsewhere and import them, from a file or with Python as the host
   \item The pre-flight checks columns filled before the first cycle.
   \item A fill on the host by an untraced function exists under an explicit
         name, for fills made once.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
+\section{Checkpoints, restart and database files}
+\label{sec:checkpoint}
+
+Three needs are met by one mechanism: saving a run so that it can continue
+later, changing a run at the point where it continues, and starting a run
+from data that another program prepared.  In each case the object is a
+\emph{database file}: the store, written out with enough beside it to be
+understood without the program that wrote it.
+
+\subsection{What a checkpoint holds}
+\label{sec:checkpoint-holds}
+
+A checkpoint is more than the tables.
+
+\begin{itemize}
+  \item The \emph{effective schema}: the definitions of every package
+        together with whatever the driver added, in the machine-readable
+        form of Section~\ref{sec:docs}.
+  \item The records, the cycle counter and the clock
+        (Sections~\ref{sec:records} and~\ref{sec:cycles}).
+  \item The expressions behind analytic fields, with their refresh policies
+        (Section~\ref{sec:expressions}).
+  \item The text of the driver script and of every modification script, and
+        the journal of commands executed (Section~\ref{sec:replay}).
+  \item The system of units of each package and the version of the
+        physical constants (Section~\ref{sec:units}).
+\end{itemize}
+
+It is also less than the tables.  What can be rebuilt is not written: ghost
+rows, derived relations, generated look-up tables, exchange plans and the
+copies of columns on a device.  Nor is every field written.  Each field has
+a \emph{persistence class}, which its owner declares.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[State.]
+        The default.  The field is written to every checkpoint.
+  \item[Derived.]
+        The field is not written.  It declares how it is rebuilt: by an
+        expression, or by a kernel that a package supplies.
+  \item[Scratch.]
+        The field is not written and has no meaning from one cycle to the
+        next.  At a restart it is filled with values that are not numbers,
+        so that a kernel which reads it before writing it is found at once.
+\end{description}
+
+A flag that merely excluded a field would be dangerous, because excluding a
+field that is in fact state breaks restarts without any sign.  The classes
+make the developer say why a field is left out, and the restart test of
+Section~\ref{sec:replay} finds a field that was classed wrongly.  A driver
+may ask for more fields to be written, for debugging, and declares the
+class of the fields it adds itself.  It may not exclude a package's state.
+
+Anything a package holds outside the store is lost at a restart.  A package
+with such state must move it into fields or records when it receives the
+message that announces a checkpoint.
+
+\subsection{Writing a checkpoint}
+
+Checkpoints are written only between cycles (Section~\ref{sec:cycles}),
+when every package is in a consistent state.  A driver asks for one by
+command, as the sketch of Section~\ref{sec:sketch} does after a stop on the
+wall clock, or at intervals through the triggers of
+Section~\ref{sec:cycles}.  Writing is a standard sequence.
+
+\begin{enumerate}
+  \item Packages are told that a checkpoint is about to be written, and
+        move any state of their own into the store.
+  \item Columns whose current copy is on a device are brought to the host,
+        one column at a time, so that the host never holds a second copy of
+        everything.
+  \item The schema, the records, the journal and the state fields are
+        written.
+  \item A checksum and a mark of completion are written last.  The file is
+        written under a temporary name and renamed, and the last few
+        checkpoints are kept, so that a failure during writing never
+        destroys the only good one.
+\end{enumerate}
+
+\paragraph{Format.}  HDF5 is the first format~\cite{hdf5}: one dataset for
+each column, one group for each table, the schema and the journal beside
+them.  It is read and written from every language, which matters for
+Section~\ref{sec:interchange}.  The writer sits behind an internal
+interface, as MPI does (Section~\ref{sec:mpi}).  Whether one shared HDF5
+file performs adequately on the largest machines is not assumed, and the
+interface leaves room for ADIOS2~\cite{adios2} as a second format.
+
+\paragraph{Checkpoints are not output.}  A checkpoint holds all state at
+full precision, exists so that a run can continue, and is kept in small
+numbers.  An output file holds the fields a user selected, exists to be
+analyzed, and is kept in large numbers.  The same writer serves both; they
+differ in what is selected.
+
+\subsection{Restart by replay}
+\label{sec:replay}
+
+Restoring the data is the easy half of a restart.  The hard half is the
+driver, which is a program: it may run, create objects and run again, and a
+checkpoint may fall anywhere in that.  Standard Lua has no means of saving
+a program in the middle of its execution; even its function for saving a
+single function does not save the variables the function
+captured~\cite{lua55}.
+
+The decision is to restart by \emph{replay}.  The same driver script is
+executed again from its first line, against a journal that the checkpoint
+carries.  There is no separate restart script.  LAMMPS takes the other
+course, a second input script that reads the restart file, and its
+documentation lists what the user must then specify again by hand: fixes,
+computes, variables, regions and the settings for
+output~\cite{lammpsrestart}.
+
+\paragraph{The journal.}  The checkpoint records, in order, each command
+the driver completed and the result it returned.  On replay there are two
+kinds of command.
+
+\begin{itemize}
+  \item \emph{Commands that change the database}: creating a table or rows,
+        setting a field, deleting, writing a checkpoint.  Their effects are
+        already in the checkpoint.  On replay they are not executed.  Each
+        returns its recorded result, and a handle it returned is bound to
+        the restored object.
+  \item \emph{Commands that change only the process}: loading a package,
+        registering a handler written in Lua.  Their effects are not in any
+        file.  They are executed again in every session.
+\end{itemize}
+
+The \code{run} that was interrupted resumes with what remains of it.  The
+journal records the cycle at which it began, so relative limits
+(Section~\ref{sec:cycles}) are honored as well as absolute ones.
+
+\paragraph{A driver that was edited.}  Replay compares each command with
+the journal.  A change to a command that was completed is an error, which
+names the first command that differs, because the past cannot be changed.
+The stop conditions of the interrupted \code{run} may be changed, and that
+is how a run is extended.  Everything after it is free.
+
+\paragraph{One rule for users.}  The state of Lua variables does not
+survive a restart.  Whatever must survive belongs in a record.
+
+\paragraph{A different layout.}  The store owns partitioning and placement,
+so a checkpoint can be read on a different number of ranks or on a
+different device.  The results are then no longer identical bit for bit,
+since the order of floating-point operations changes; LAMMPS documents the
+same of its own restarts~\cite{lammpsrestart}.
+
+\paragraph{The restart test.}  Run twenty cycles.  Separately run ten,
+restart, and run ten more.  Compare the two bit for bit, on the same layout.
+A difference means that state is missing from the store or that a field has
+the wrong persistence class.  The test is cheap, and every package should
+run it in continuous integration (Section~\ref{sec:ci}).
+
+\subsection{Modification scripts}
+\label{sec:modification}
+
+A user may want to change a run where it restarts: alter existing objects,
+create new ones, delete some.  This needs no new kind of script.  A
+\emph{modification script} is a batch of commands in the driver role
+(Section~\ref{sec:scripts}) that is injected at a boundary between cycles.
+A restart is simply the commonest moment to inject one.
+
+The program of a run is then its driver followed by its modification
+scripts, in order.  The checkpoint stores the text of each and the cycle at
+which it was applied.
+
+\begin{lstlisting}
+job 1:  driver.lua runs to cycle 4000 and checkpoints (wall clock)
+job 2:  restart with M1.lua  ->  M1 applied at cycle 4000, recorded; runs to 7000
+job 3:  restart, no options  ->  driver replayed, M1 replayed, resumes at 7000
+\end{lstlisting}
+
+\begin{itemize}
+  \item \emph{It is replayed like the driver.}  In the third job the
+        commands of M1 that change the database are not executed, and any
+        handlers it registered are registered again.
+  \item \emph{It is applied once.}  A script is known by a hash of its
+        text.  If a job script that is resubmitted in a chain names M1
+        again, the core recognizes it and refuses, so a modification cannot
+        be applied a second time by accident.
+  \item \emph{It sees the database, not the driver's variables.}  It finds
+        objects by name.
+  \item \emph{It is checked before the job is submitted.}  The check
+        invocation reads the schema, the records and the row counts of the
+        checkpoint into its shadow state (Section~\ref{sec:validation}),
+        replays the driver on it, applies the modification, continues
+        through the rest of the driver and calls every handler.  A
+        modification that deletes a table the driver uses later is found
+        there.
+  \item \emph{The run remains reproducible.}  Running the driver from the
+        beginning with the recorded modifications applies each at its
+        recorded cycle.
+\end{itemize}
+
+\paragraph{What may be modified.}  Deletion cannot be unrestricted.
+Removing the cells of a mesh row by row would break a topology that only
+the mesh package understands.  Two controls apply.
+
+\begin{itemize}
+  \item \emph{The owner of a type decides whether a driver may create and
+        delete its rows directly.}  For a type such as a particle it
+        usually may.  For the entities of a mesh the owner will usually
+        require that changes go through the package's own commands.
+  \item \emph{A field declares whether its value may change after a run has
+        started.}  Parthenon makes the same distinction among its
+        parameters~\cite{parthenondocs}.
+\end{itemize}
+
+After a modification the versions of the tables it touched are advanced,
+packages are told that they changed (Section~\ref{sec:mesh-change}), and
+the pre-flight checks of Section~\ref{sec:preflight} are made again before
+the run continues.
+
+\subsection{Matching a file to its schema}
+\label{sec:file-schema}
+
+A file carries its schema, not merely a version number.  For each package
+it also records the package's version, the schema version and the hash of
+the definition script.  When a file is read, each type in it is compared
+with the definitions that are loaded, and there are four outcomes.
+
+\begin{enumerate}
+  \item The hashes are identical, and reading proceeds.
+  \item The file has an older schema version and a migration exists.  The
+        data are migrated in memory, and the file is not altered.
+  \item The schema differs but the schema version is the same.  The file is
+        refused: a definition was changed without a new version, which is
+        what the compatibility check of Section~\ref{sec:validation} exists
+        to prevent.
+  \item The file is newer than the code.  It is refused.
+\end{enumerate}
+
+Fields are matched by their stable identifiers, not by position.  A field
+added in a newer version is filled from its default, so that only renaming
+a field or changing its meaning requires a migration to be written.  Units
+are recorded with every field, so a change of unit is a conversion
+(Section~\ref{sec:units}).  The fields and types a driver added are
+recorded with their namespace and matched to the driver's commands on
+replay.  The layout of the file has a version number of its own, distinct
+from those of the packages.  A file without its mark of completion, or
+whose checksum fails, is rejected.  The check invocation reports all of
+this on a login node, before a job is submitted.
+
+\subsection{Database files as the interchange format}
+\label{sec:interchange}
+
+The describe invocation already emits the schema of a package
+(Section~\ref{sec:docs}).  It can also write a database file that contains
+the schema and no rows.  That file is a \emph{template}, and it makes
+starting from prepared data the same operation as restarting: a file filled
+by another program is a checkpoint at cycle~0.  No separate path for
+importing is needed.
+
+\paragraph{Meshes from other programs.}  This is the main use, since a mesh
+is often generated by a program outside \camshaft{}.
+
+\begin{itemize}
+  \item \emph{For a program the user writes, the template is the
+        interface.}  A preprocessor in Python opens it, finds the tables
+        and fields by name, and writes arrays into them.
+  \item \emph{Existing generators write their own formats,} so a converter
+        is still needed.  The mesh package offers an import command for the
+        standard formats, and the template is what its converters produce.
+  \item \emph{Only the state fields need be supplied.}  A program supplies
+        nodes, the connectivity of cells and the tags of boundaries.  Faces,
+        adjacencies, global identifiers and the partition are derived by
+        the mesh package when the file is loaded.  The persistence classes
+        of Section~\ref{sec:checkpoint-holds} are what tell an external
+        program which fields it must write.
+  \item \emph{A filled file is validated before a job is submitted.}  It is
+        only data, so the check invocation can verify its structure (index
+        ranges, units, constraints) and call the mesh package's own
+        validation (orientation, positive volumes) on a login node.
+\end{itemize}
+
+The interchange format is HDF5 whatever format large checkpoints use,
+because programs in every language can write it.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item Every field has a persistence class, and a derived field declares
+        how it is rebuilt.
+  \item Every file carries the effective schema, the versions and hashes of
+        its packages, a checksum and a mark of completion.
+  \item The core keeps a journal, and every command, including those that
+        packages add, declares whether it changes the database or only the
+        process.
+  \item A restart executes the same driver against the journal.
+  \item Modification scripts are injected at a boundary between cycles,
+        applied once, recorded in the checkpoint, and checked against the
+        checkpoint beforehand.
+  \item A type declares whether drivers may create and delete its rows, and
+        a field whether it may change after the start.
+  \item The describe invocation writes a template file, and a run may start
+        from any database file whose schema matches.
 \end{enumerate}
 
 %------------------------------------------------------------------------------
@@ -2581,7 +2891,7 @@ Compilation & In the core, memory errors and data races, by the Rust compiler.  
 Definition check & Names; namespaces and ownership; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
 Loading a package & Each kernel's declared columns, with their types and units, against the schema; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
-Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
+Driver check & The arguments of every command; references to tables, records and names; that files exist; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
 Pre-flight & That every record is complete; that every message which will be sent has a handler, and every handler a kernel for the device its table is on; that exchange plans can be built; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
 During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
 \bottomrule
@@ -2823,6 +3133,15 @@ cycle on which its message is first sent.
         which evaluates at points, and the package, which decides what
         points and how to project, has not been tested against a real
         discretization.
+  \item \textbf{Restart by replay.}  Section~\ref{sec:replay} restarts a
+        run by executing its driver again against a journal.  That depends
+        on three things that are untried.  Every command must be classed
+        correctly as changing the database or changing only the process,
+        including the commands that packages add.  Users must accept that
+        the state of Lua variables does not survive a restart.  And
+        packages must keep everything that matters in the store; the
+        restart test finds a package that does not, but only for the cases
+        the test exercises.
   \item \textbf{Two storage classes.}  Section~\ref{sec:records} separates
         records from bulk tables.  The boundary is clear for a solver and
         for a particle, and less clear in between: a problem with thousands
@@ -2901,7 +3220,11 @@ through every milestone from M1.
         (Section~\ref{sec:validation}); kinds of quantity, dimensions,
         systems of units as records, and physical constants supplied in the
         system in force (Section~\ref{sec:units});
-        tables with aligned columns; records and table attributes; a look-up
+        persistence classes; tables with aligned columns; records and table
+        attributes; a database file written and read on one process,
+        carrying its schema, with the matching rules of
+        Section~\ref{sec:file-schema}, and an empty file as a template; a
+        look-up
         table generated from records; creation and deletion of rows; Arrow C
         data interface export and import.
         Relation columns of fixed and variable arity with declared targets;
@@ -2995,7 +3318,11 @@ through every milestone from M1.
         the device should live.
   \item[M6. Distribution.]
         Run the interpreter on several MPI ranks; exchange declared columns;
-        parallel checkpoint and restart.  Global identifiers, ownership and
+        parallel checkpoint and restart by replay
+        (Section~\ref{sec:checkpoint}): the journal, the two kinds of
+        command, a modification script applied at a restart and replayed at
+        the next, restart on a different number of ranks, and the restart
+        test.  Global identifiers, ownership and
         ghost rows; the ghost-to-owner primitive; partition and migrate both
         meshes with dependent rows found through relations; rebalance after
         adaptation.
@@ -3007,7 +3334,9 @@ through every milestone from M1.
         unstructured and the block-based mesh, and write one small physics
         package against the protocol that runs unchanged on both where the
         discretization allows.  Projection of an expression by each mesh
-        package: a point sample and a cell average.
+        package: a point sample and a cell average.  A mesh written by
+        another program into a template file, validated by the check
+        invocation and completed by the mesh package on loading.
 \end{description}
 
 Milestones M1 to M4 exercise every architectural decision that does not
@@ -3112,7 +3441,7 @@ They are insufficient in three respects.
 \toprule
 Tier & Where and when & What runs \\
 \midrule
-1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
+1 & Hosted; every push and pull request & Formatting and lints; unit tests on Linux (both architectures) and macOS; Miri on the store; installation, then the Kokkos adapter and example packages in C, C++ and Fortran built with CMake against the installed library (Kokkos serial and OpenMP); header up to date; the restart test of Section~\ref{sec:replay} for each example package; the example packages pass the definition, compatibility and driver checks of Section~\ref{sec:validation}; documentation builds with its lints, and documented examples pass the check invocation; this report builds \\
 2 & Hosted; nightly & Compiler matrix (GNU, LLVM, Intel, NVIDIA); MPI matrix with a few ranks; static configuration; Python and Julia as hosts; sanitizers across the language boundary; device paths that run without a GPU; ABI comparison; instruction-count benchmarks; nightly-Rust experiments, allowed to fail \\
 3 & Dedicated workstation with a GPU; on demand & Real GPU runs through Kokkos CUDA and the Rust routes; wall-clock benchmarks for the milestone targets; MPI with more ranks \\
 4 & A cluster; per campaign & Vendor compilers and wrappers; vendor MPI; AMD and Intel GPUs; static configuration; scaling \\
@@ -3371,6 +3700,7 @@ Distributed memory & MPI behind an internal interface; \code{rsmpi} first, the M
 Plugins & One registration entry point; static or dynamic linking \\
 Process model & The infrastructure is a library; \code{main} is trivial and may belong to the default Rust executable, a custom application, or a Python or Julia host; the library fixes start-up and shut-down order \\
 Linking & Dynamic by default, each language linking its own plugin against one shared \code{libcamshaft}; static builds linked by CMake with one Rust static library and a generated registration table \\
+Checkpoints and restart & A checkpoint holds the effective schema, records, state fields, the clock and a journal; written between cycles, HDF5 first; restart by replaying the same driver, never a separate script; modification scripts are driver commands injected at a cycle boundary, applied once and recorded; fields are state, derived or scratch; a database file with no rows is the template for data from other programs \\
 Analytic fields & Formulas in a driver are symbolic expressions, built directly or by tracing a Lua function once; evaluated into columns with a refresh policy, on the host by the core and on a device by the Kokkos adapter; units opt-in for each expression and then checked throughout; projection decided by the mesh or physics package; a fill on the host by an untraced function allowed once, under an explicit name \\
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
