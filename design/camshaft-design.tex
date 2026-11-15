@@ -113,6 +113,9 @@ another program (Section~\ref{sec:checkpoint}).
 Formulas that a user writes in a driver script are captured as symbolic
 expressions, checked for dimensional consistency before the run and
 evaluated into columns without Lua (Section~\ref{sec:expressions}).
+Handlers do not print: they emit structured records that the library merges
+across ranks, and numerical diagnostics are declared and collected as data
+(Section~\ref{sec:logging}).
 An error at run time is reported by a package and acted on by the library,
 which stops every rank at the same point and prints one report; packages
 are built to declared floating-point profiles, and results are compared bit
@@ -1850,7 +1853,8 @@ the normal one, that detects them.
         in flight when a handler returns.
   \item \emph{The process is compared before and after each call}: the
         signal handlers installed, the threads running, the files open, the
-        floating-point environment.
+        floating-point environment, and whether anything was written to
+        standard output or standard error (Section~\ref{sec:logging}).
   \item \emph{The sequence of events is compared across ranks} after every
         event, and not at intervals (Section~\ref{sec:strict}).
   \item \emph{Declarations that are too wide are reported.}  A column
@@ -4577,7 +4581,8 @@ The full detail for each rank is written to files.
 
 \paragraph{Warnings.}  A warning is deduplicated across ranks and across
 cycles, and printed with a count, so that a condition met in every cell of
-every cycle does not flood the output.
+every cycle does not flood the output.  Section~\ref{sec:logging} treats
+warnings with the other records a handler may emit.
 
 \paragraph{Hosts and exit codes.}  The library returns the error to its
 host.  The default executable aborts through MPI; a Python or Julia host
@@ -4613,6 +4618,147 @@ recorded here as a possibility and not adopted.
         faults abort at once; either way one merged report is printed.
   \item Warnings are deduplicated; exit codes distinguish the classes of
         failure; diagnostic dumps are written on request.
+\end{enumerate}
+
+%------------------------------------------------------------------------------
+\section{Logging, diagnostics and output from handlers}
+\label{sec:logging}
+
+Three things are commonly mixed that this section keeps apart: text for
+people to read, which is logging; numbers that describe a run, which are
+diagnostics; and the fields themselves, which are written as database files
+(Section~\ref{sec:checkpoint}).
+
+\subsection{Handlers do not print}
+
+A handler never writes to standard output or standard error.  The reasons
+are those for which it never aborts (Section~\ref{sec:errors}).
+
+\begin{itemize}
+  \item \emph{Ranks.}  A line printed by a handler appears once for every
+        rank, interleaved with the others.
+  \item \emph{Devices.}  A kernel on a GPU cannot print.
+  \item \emph{Hosts.}  Under Python or Julia, standard output belongs to the
+        host.
+  \item \emph{Tests.}  The harness cannot reliably examine free text.
+\end{itemize}
+
+\subsection{Log records}
+
+A handler emits a \emph{record} through a function on its context.  A
+record has a level, a message and, optionally, named values.  The core adds
+the logical context it already keeps (Section~\ref{sec:errors}): the cycle,
+the rank, the package, the handler and the table.  The developer writes
+that an iteration did not converge, and the record says where and when.
+
+\paragraph{Levels.}  There are five: error and warning, which
+Section~\ref{sec:errors} introduced, and info, debug and trace.  The driver
+sets the level for each package.  A record below the level costs one
+comparison, and debug and trace can be removed from a release build when it
+is compiled.
+
+\paragraph{Which records are declared.}  A warning is declared in the
+definition, as an error is, with an identifier and documentation.  The
+generated documentation then lists the warnings a package can give, and a
+test can expect one by its identifier (Section~\ref{sec:harness}).  Records
+at the levels of info, debug and trace are free text.
+
+\paragraph{Merging across ranks.}  Records are held on each rank and merged
+at the boundary between events, in the reduction that already examines
+errors (Section~\ref{sec:order}).
+
+\begin{itemize}
+  \item A record that is identical on every rank is reported once.
+  \item A record that differs between ranks is reported once, with the
+        number of ranks and the range of its values.
+  \item The full detail for each rank is written to a file for that rank.
+\end{itemize}
+
+\paragraph{Sinks.}  Where records go is for the host or the driver to
+choose, and not for a package.  The sinks are a merged stream for people to
+read; the files for each rank; a structured file with one JSON record on
+each line, which existing tools for logs can read; and a callback, through
+which a Python host can pass records to its own logging.
+
+\paragraph{From Lua.}  Driver scripts and handlers written in Lua have the
+same functions.  In the strict environments of Section~\ref{sec:strict},
+\code{print} is routed to them, so that what a script prints appears once
+and not once for every rank.
+
+\subsection{What a kernel can do}
+
+A kernel cannot emit a record.  It can count.  The Kokkos adapter supplies
+counters that a kernel increments, for the number of cells in which a
+limiter acted, say, and when the kernel has finished, the handler emits a
+record with the total.  This is the rule of
+Section~\ref{sec:dispatch-devices} again: a kernel writes data, and the host
+acts on it.
+
+\subsection{Diagnostics}
+
+A total energy or a residual reported in every cycle is data and not text.
+A package declares each \emph{diagnostic} in its definition: a name, a kind
+of quantity (Section~\ref{sec:units}), the rule by which values are
+combined across tables and ranks (Section~\ref{sec:mechanism}), and
+documentation.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.diagnostic("pusher.kinetic-energy", {
+  kind = "energy", combine = "sum",
+  doc = "Total kinetic energy of all particles.",
+})
+\end{lstlisting}
+
+The core collects diagnostics through combined results and writes them as a
+time series, one row for each cycle, with their units.  A diagnostic
+thereby gains what text in a log cannot have: its unit is checked, it is
+documented, and its history can be compared by the harness as a baseline is
+(Section~\ref{sec:harness}).  A diagnostic that is a sum is subject to the
+caution of Section~\ref{sec:reproducibility} about the order of summation.
+
+\subsection{Output that a package does not control}
+
+A library that a handler calls may print of its own accord.
+
+\begin{itemize}
+  \item \emph{It is declared.}  Output of a handler's own is one of the
+        effects of Table~\ref{tab:effects}.
+  \item \emph{It is captured.}  While a handler that declared it is running,
+        standard output and standard error are redirected to the file for
+        that rank.
+  \item \emph{It is detected when it was not declared.}  In audit mode,
+        anything written to standard output or standard error during a
+        handler that did not declare it is an undeclared effect
+        (Section~\ref{sec:undeclared}).
+\end{itemize}
+
+\subsection{What the core reports itself}
+
+\begin{itemize}
+  \item \emph{Progress.}  One line for each cycle, or for every so many: the
+        cycle, the time, the time step, the package whose proposal limited
+        it, and the time the cycle took.
+  \item \emph{Timing.}  At the end of a run, a summary for each handler, from
+        the times the dispatcher already has (Section~\ref{sec:visibility}).
+\end{itemize}
+
+Logs are not part of the state of a run.  Commands that are replayed at a
+restart (Section~\ref{sec:replay}) do not emit their records again.  After
+a fault, the records that each rank still holds are written to its file as
+far as that is possible.
+
+\subsection{Consequences for the design}
+
+\begin{enumerate}
+  \item The C interface has a function that emits a record, and the context
+        of a handler offers it.
+  \item Definition scripts declare warnings and diagnostics.
+  \item The core merges records across ranks at the boundary between events
+        and delivers them to sinks that the host or driver chose.
+  \item The Kokkos adapter supplies counters for use in kernels.
+  \item Standard output and standard error are captured during handlers
+        that declared output of their own, and watched in audit mode during
+        those that did not.
 \end{enumerate}
 
 %------------------------------------------------------------------------------
@@ -4918,7 +5064,9 @@ through every milestone from M1.
         schedule printed by the check invocation.
         The pre-flight checks before the first cycle.  The error function,
         the logical context kept by the dispatcher, the report, and exit
-        codes (Section~\ref{sec:errors}).  Table version counters and invalidation of
+        codes (Section~\ref{sec:errors}).  Log records merged across ranks,
+        declared warnings and diagnostics, and the status line of a cycle
+        (Section~\ref{sec:logging}).  Table version counters and invalidation of
         cached lists.  The adaptation sequence of
         Section~\ref{sec:mesh-change} on the block-based mesh, with transfer
         maps and per-field transfer rules; dispatch of one message to the
@@ -5737,6 +5885,7 @@ Analytic fields & Formulas in a driver are symbolic expressions, built directly 
 Units & A field states its kind of quantity and takes the coherent unit of the package's system of units, or names a unit explicitly; dimensions are checked; a system of units is a record of base-unit sizes; constants come from the core; packages declare their system of quantities and whether they are unit-agnostic; several systems of units may coexist in a run, with mismatches refused at load \\
 Validation & Every check at the earliest stage that can make it: compilers and generated headers, an offline definition check, a schema compatibility check, package load, a driver check on a shadow state that also calls every handler once, and a pre-flight before the first cycle; constraints and units as field metadata read by one validator in the core; strict script environments \\
 Documentation & User documentation as \code{doc} arguments in definition scripts, stored in the registry, rendered from one machine-readable description and shipped inside the plugin; developer documentation from the code with each language's own tool, the C header documented from the Rust source; mdBook for the sites, with Sphinx as the fallback \\
+Logging and diagnostics & Handlers never write to standard output; they emit structured records at five levels, which the library merges across ranks and sends to sinks the host chooses, among them a file of one JSON record per line; warnings are declared like errors; kernels count and handlers log the counts; diagnostics are declared scalars with units, collected as a time series; output of a library's own is a declared effect and is captured \\
 Run-time errors & A package reports a structured error and returns; it never aborts.  The library stops every rank at the next event boundary and prints one merged report with the logical context, the script location and, on request, a native backtrace; faults are reported as far as possible and abort every rank; errors are declared in definition scripts; diagnostic dumps on request; retry of a failed cycle deferred \\
 Floating point & Three build profiles, strict, release and fast, with release the default for shipped packages; the library owns the floating-point environment and sets it around each handler; traps in the strict profile, flag checks and scans of written columns elsewhere \\
 Numerical reproducibility & Bit for bit on the same binary and layout; within per-field tolerances across ranks, devices, profiles and compilers; ensemble testing by the CESM-ECT rule, chosen explicitly and with mandatory positive controls, where a problem is chaotic; order-independent summation deferred \\
