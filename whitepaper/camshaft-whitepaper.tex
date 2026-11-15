@@ -203,10 +203,11 @@ that stands beside the bindings for other languages.
 %------------------------------------------------------------------------------
 \section{What a package developer writes}
 
-A package has two parts: a \emph{definition script}, which declares what
-the package provides, and compiled handlers, which do the work.  The
-definition script below belongs to an invented package for particle
-simulation, used here only as an example.
+A package has two parts: a \emph{definition}, written as one or more
+\emph{definition scripts}, which declares what the package provides, and
+compiled handlers, which do the work.  The definition script below belongs
+to an invented package for particle simulation, used here only as an
+example.
 
 \begin{lstlisting}[language={[5.3]Lua}]
 -- A record type: configuration, held on the host, identical on every rank.
