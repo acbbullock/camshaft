@@ -12,12 +12,15 @@ The project is in its design phase. No code has been written yet.
 - `design/` — the design report, in LaTeX: the requirements, a survey of
   prior art, the architecture and the reasoning behind it, the policies for
   validation, testing and errors, and a prototype plan.
+- `whitepaper/` — a short white paper derived from the design report: the
+  problem, the design in brief, what package developers and users write, and
+  the plan and its risks.
 
-## Building the report
+## Building the documents
 
 ```sh
-cd design
-make            # requires latexmk, pdflatex and biber
+cd design        # or: cd whitepaper
+make             # requires latexmk, pdflatex and biber
 ```
 
-The PDF is a build artifact and is not tracked.
+The PDFs are build artifacts and are not tracked.
