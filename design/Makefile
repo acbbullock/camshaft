@@ -1,4 +1,4 @@
-DOC := camshaft-research
+DOC := camshaft-design
 
 .PHONY: all clean distclean
 

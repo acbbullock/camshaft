@@ -1,4 +1,4 @@
-# LaTeX build artefacts
+# LaTeX build artifacts
 *.aux
 *.bbl
 *.bcf
@@ -12,7 +12,7 @@
 *.run.xml
 *.synctex.gz
 *.toc
-research/*.pdf
+design/*.pdf
 
 # Rust
 /target/
