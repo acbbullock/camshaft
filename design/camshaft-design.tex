@@ -487,8 +487,9 @@ loading of a package and a check made before the run.
 
 \begin{enumerate}
   \item \textbf{The definition script is the single source of truth, and it
-        is shipped with the package.}  It is embedded in the plugin, or a
-        hash of it is checked when the plugin is loaded, so that the script
+        is shipped with the package.}  It is embedded in the plugin, and a
+        hash of the description it produces is checked when the plugin is
+        loaded (Section~\ref{sec:definition-scripts}), so that the script
         and the compiled code cannot drift apart.  The rule is one source of
         truth per package.  A Rust package compiled into the core may derive
         its definitions from Rust types (Section~\ref{sec:language})
@@ -531,6 +532,83 @@ loading of a package and a check made before the run.
         prints its types, fields, parameters and messages; generate
         headers; and run test scripts (Section~\ref{sec:harness}).
 \end{enumerate}
+
+\subsection{A definition in several scripts}
+\label{sec:definition-scripts}
+
+This report speaks of \enquote{the definition script} of a package.  In
+practice a package of any size will divide its definitions among several
+scripts, as a CMake project divides its build among directories, and will
+keep each script beside the code it describes.
+
+\paragraph{One root, and explicit inclusion.}  A package has one root
+script.  The root names the others with Lua's \code{require}, and they may
+name others in turn.  Nothing is found by scanning directories, because
+scanning makes the order of processing depend on the file system.
+
+\begin{lstlisting}[language={[5.3]Lua}]
+-- pusher/definitions.lua: the root script of the package.
+local species  = require "pusher.species"    -- pusher/species/definitions.lua
+local particle = require "pusher.particle"   -- may itself require "pusher.species"
+\end{lstlisting}
+
+The whole set is embedded in the plugin, and \code{require} resolves within
+that set and never on disk, so that an installed package carries its own
+definitions.  A CMake function collects the scripts and generates one typed
+header for each, so that a change to one script recompiles only the code
+that includes its header.
+
+\paragraph{The order of processing.}
+
+\begin{enumerate}
+  \item Between packages, by the graph of dependencies
+        (Section~\ref{sec:packages}).  All the scripts of a package are
+        evaluated before those of any package that depends on it.
+  \item Within a package, depth-first from the root, in the order in which
+        the \code{require} calls are written, each script once.
+  \item A cycle among scripts is an error at the definition check.
+  \item Within a script, from top to bottom, as Lua runs.
+\end{enumerate}
+
+\paragraph{Making the order not matter.}  That order is deterministic, but a
+design that depended on it would be fragile in the way that the modes of
+Section~\ref{sec:scripts} would have been.  Four measures make the result
+the same whatever the order.
+
+\begin{itemize}
+  \item \emph{References by name are resolved at the end.}  A script may
+        refer to a type by its qualified name before the script that
+        defines it has run.  The core collects every definition first and
+        resolves names afterward, as a linker does.
+  \item \emph{Identifiers do not come from order.}  Stable identifiers are
+        derived from qualified names (Section~\ref{sec:schema-record}), and
+        the internal ones are assigned after sorting.
+  \item \emph{The hash is of the description, not of the text.}  The hash
+        that a plugin records is computed over the canonical form of the
+        package's machine-readable description (Section~\ref{sec:docs}).
+        Moving a definition from one script to another, or reformatting a
+        script, therefore changes nothing.
+  \item \emph{A name defined twice is an error,} reported with both
+        locations.
+\end{itemize}
+
+\paragraph{Where order would still leak.}  Two things would otherwise depend
+on the order in which scripts are processed, and each is given a rule of
+its own.
+
+\begin{itemize}
+  \item \emph{The order of handlers within a cycle.}  It is set by explicit
+        constraints and never by the order of declaration
+        (Section~\ref{sec:cycles}).
+  \item \emph{The layout of a record passed by value.}  Its fields are laid
+        out in the order of the declaration that defines the type, followed
+        by any fields added elsewhere, sorted by name
+        (Section~\ref{sec:records}).
+\end{itemize}
+
+\paragraph{Deferred.}  Whether a driver may load only part of a package is
+left open.  It would make a package's description depend on options, which
+complicates the check of the hash.
 
 \subsection{What the DSL might look like}
 \label{sec:sketch}
@@ -806,7 +884,8 @@ over both sides.  The design is as follows.
   \item \textbf{What a kernel sees of a record is fixed-width.}  It reaches
         the kernel in one of two ways.  For one record per call (a solver's
         tolerance), the fixed-width fields are passed by value with the
-        call, as a small plain structure.  For a look-up per element (cells
+        call, as a small plain structure, whose layout is fixed by the rule
+        of Section~\ref{sec:definition-scripts}.  For a look-up per element (cells
         that each hold a material index), the fixed-width fields of a set of
         records are generated into an ordinary bulk table, which rows refer
         to through a relation and which can live on a device.  The generated
@@ -1117,10 +1196,8 @@ events.
 \begin{enumerate}
   \item \code{cycle\_begin} is emitted.
   \item The time step is chosen, when there is a clock.
-  \item The messages that packages have scheduled in the cycle are sent.  A
-        package schedules a message when it declares it.  The order among
-        packages is the driver's to set, and defaults to an order consistent
-        with their dependencies (Section~\ref{sec:packages}).
+  \item The messages that packages have scheduled in the cycle are sent, in
+        the order described below.
   \item The clock is advanced and the cycle counter is incremented.
   \item \code{cycle\_end} is emitted.
   \item The stop conditions are tested.
@@ -1131,6 +1208,38 @@ cycles, and checkpoints are written between cycles
 (Section~\ref{sec:checkpoint}).  Before the first cycle of a run the core makes the pre-flight
 checks of Section~\ref{sec:preflight}, so that what can be known to be wrong
 is reported then and not at the cycle where it would first be used.
+
+\paragraph{The order of messages within a cycle.}  A package schedules a
+message when it declares it.  The order in which scheduled messages are sent
+is set by explicit constraints, each saying that a message comes after or
+before another, and never by the order in which the declarations happen to
+be processed (Section~\ref{sec:definition-scripts}).
+
+\begin{lstlisting}[language={[5.3]Lua}]
+cam.message("pusher.advance", { schedule = "cycle" })
+cam.message("pusher.collide", { schedule = "cycle", after = "pusher.advance" })
+\end{lstlisting}
+
+The core orders the messages so that every constraint is honored.  Cactus
+schedules its routines in the same way, each stating that it must run
+before or after another~\cite{cactusguide}.  Three rules complete the
+scheme.
+
+\begin{itemize}
+  \item \emph{Constraints must not form a cycle.}  The definition check
+        reports one that does.
+  \item \emph{What must be ordered is known from the declarations.}  Two
+        scheduled messages need an order when a handler of one writes a
+        column that a handler of the other reads or writes
+        (Section~\ref{sec:handlers}).  The definition check reports such a
+        pair that no constraint orders.  Messages left unordered touch
+        separate data, and the core sends them in order of name, so that
+        every rank does the same.
+  \item \emph{Between packages,} a package may constrain its messages
+        relative to those of packages it depends on
+        (Section~\ref{sec:packages}), and the driver may add constraints of
+        its own.
+\end{itemize}
 
 \paragraph{Stopping.}  \code{run} takes several stop conditions, stops at
 the first one that is met, and returns which it was, so that the driver can
@@ -1613,10 +1722,12 @@ that the code agrees with the header.  Two checks at load complete the
 argument.
 
 \begin{enumerate}
-  \item \textbf{The hash.}  A plugin records a hash of the definition script
-        it was built from.  The core compares it with the definitions that
-        are loaded and refuses a plugin whose hash differs, so that a header
-        which has gone out of date cannot pass.
+  \item \textbf{The hash.}  A plugin records a hash of the description of
+        the package it was built from
+        (Section~\ref{sec:definition-scripts}).  The core compares it with
+        that of the definitions that are loaded and refuses a plugin whose
+        hash differs, so that a header which has gone out of date cannot
+        pass.
   \item \textbf{The declaration.}  Each handler is registered with a
         declaration, as plain data: every column it reads and writes, with
         its element type, shape, unit and device
@@ -1933,8 +2044,9 @@ which implements the protocol may be loaded in its place.
 
 \begin{itemize}
   \item \emph{Order.}  Packages are loaded, initialized and finalized in an
-        order consistent with the graph (Section~\ref{sec:build}), and the
-        default order of their handlers within a cycle follows it too
+        order consistent with the graph (Section~\ref{sec:build}).  The order
+        of messages within a cycle is set by explicit constraints, and a
+        package may state them only relative to packages it depends on
         (Section~\ref{sec:cycles}).
   \item \emph{Consistency before the run.}  The check invocation verifies
         that every requirement can be met by the set of packages a driver
@@ -3276,7 +3388,7 @@ the run continues.
 
 A file carries its schema, not merely a version number.  For each package
 it also records the package's version, the schema version and the hash of
-the definition script.  When a file is read, each type in it is compared
+the package's description.  When a file is read, each type in it is compared
 with the definitions that are loaded, and there are four outcomes.
 
 \begin{enumerate}
@@ -3491,7 +3603,7 @@ Stage & What is checked & What it needs \\
 Compilation & In the core, memory errors and data races, by the Rust compiler.  In packages, the names and types of fields, through the header generated from the definitions (Section~\ref{sec:scripts}) & Compilers only \\
 Definition check & Names; namespaces and ownership; that the dependencies between packages form no cycle and their version requirements can be met; the fixed-width rule for bulk types; the targets of relations; dimensions and units; defaults that break their own constraints; missing documentation & Nothing: no MPI and no device \\
 Schema compatibility & A field removed or changed since the last release without a new schema version and a migration & The description of the previous release \\
-Loading a package & Each handler's declared columns, with their types and units, against the schema; the versions of the packages it was compiled against; the hash of the definition script; the interface version; duplicated runtimes & The compiled plugin \\
+Loading a package & Each handler's declared columns, with their types and units, against the schema; the versions of the packages it was compiled against; the hash of the package's description; the interface version; duplicated runtimes & The compiled plugin \\
 Driver check & The arguments of every command; references to tables, records and names; that files exist; that every dataset is found and passes its package's probe; that a checkpoint's schema matches; a modification script, against the checkpoint it will be applied to; the dimensions of every expression; every Lua handler, by calling it once & A login node, for seconds \\
 Pre-flight & That every record is complete; that every message which will be sent has a handler for the device each of its tables is on; that exchange plans can be built; that datasets can be read from the compute nodes; that columns filled before the first cycle are finite and within their declared ranges & The real run, before its first cycle \\
 During the run & Index ranges, in debug builds; stale versions; that the ranks agree on the sequence of events; constraints on columns, on request & The real run \\
@@ -4143,7 +4255,8 @@ through every milestone from M1.
         Event queue; message and handler registration; per-table dispatch
         with cached call lists.  The run loop of Section~\ref{sec:cycles}:
         the cycle counter, the clock, messages with combined results, the
-        time-step proposal, and stop conditions, absolute and relative.
+        time-step proposal, the ordering of scheduled messages by explicit
+        constraints, and stop conditions, absolute and relative.
         The pre-flight checks before the first cycle.  The error function,
         the logical context kept by the dispatcher, the report, and exit
         codes (Section~\ref{sec:errors}).  Table version counters and invalidation of
@@ -4194,8 +4307,9 @@ through every milestone from M1.
         language.  Two packages of which one depends on the other
         (Section~\ref{sec:packages}): composition at compile time along the
         dependency, a message in the other direction, and a mismatch of
-        versions refused at load.  A plugin built from a definition script
-        that has since changed is refused by its hash
+        versions refused at load.  A package whose definition is divided among
+        several scripts (Section~\ref{sec:definition-scripts}); a plugin
+        built from definitions that have since changed is refused by its hash
         (Section~\ref{sec:type-checking}).  Errors declared in a definition script and raised from
         C++ and Fortran; the three floating-point profiles in the installed
         CMake configuration, the environment set and restored around each
@@ -4930,13 +5044,13 @@ Question & Recommendation \\
 \endfoot
 Core language & Rust, on the stable compiler \\
 Interface language & C ABI, header generated from the Rust source \\
-Type checking across languages & Each package's compiler checks its handlers against a typed header generated from the definition script; at load the core checks, by a hash, that the header is current, and checks each handler's declaration against the schema; a call checks nothing \\
+Type checking across languages & Each package's compiler checks its handlers against a typed header generated from the package's definition; at load the core checks, by a hash of the package's description, that the header is current, and checks each handler's declaration against the schema; a call checks nothing \\
 User-facing language & A DSL embedded in Lua~5.5 through \code{mlua}; confined to the control plane \\
-Scripts & Definition scripts owned by packages and driver scripts owned by users, separated by role and privilege, not by modes; the definition script is the single source of truth and can be evaluated offline; bindings checked at load; ownership by namespace, with fields added but never altered by others \\
+Scripts & Definition scripts owned by packages and driver scripts owned by users, separated by role and privilege, not by modes; the definition is the single source of truth and can be evaluated offline; it may be divided among scripts that one root includes explicitly, and its result does not depend on the order in which they are processed; bindings checked at load; ownership by namespace, with fields added but never altered by others \\
 Data model & Run-time schema; columnar tables of fixed-width fields; Arrow-compatible buffers; host and device copies per column \\
 Configuration objects & Records: same schema as bulk types, stored on the host and replicated on every rank; fixed-width fields reach kernels by value or through generated look-up tables; tables carry a record of attributes \\
 Dispatch & Dynamic per table through a (message, type, device) table, as far as the handler, which is a host function; static within the kernels a handler launches; a kernel on a device neither is a handler nor calls one \\
-Run loop & A cycle counter owned by the core as the primary measure of progress; simulation time as an optional clock; the time step chosen each cycle as the minimum of the packages' proposals; several stop conditions, absolute and relative, with the one that fired returned to the driver \\
+Run loop & A cycle counter owned by the core as the primary measure of progress; messages within a cycle ordered by explicit constraints, never by the order of declaration; simulation time as an optional clock; the time step chosen each cycle as the minimum of the packages' proposals; several stop conditions, absolute and relative, with the one that fired returned to the driver \\
 GPU strategy & The infrastructure owns memory and scheduling; handlers are opaque and their kernels may come from any toolchain \\
 Meshes & Tables plus declared relations (fixed and offsets-and-indices), index spaces across element types, table versions and transfer maps for adaptation, one ghost-to-owner communication primitive; mesh semantics in a separate protocol, not in the core \\
 Physics packages & Expected in C++ with Kokkos; served by an optional adapter (unmanaged views, life-cycle hooks, Kokkos-backed allocator) outside the core \\
