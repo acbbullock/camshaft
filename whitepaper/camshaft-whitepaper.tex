@@ -414,6 +414,18 @@ During the run & Index ranges, in debugging builds; ranks that disagree on the s
 \label{tab:stages}
 \end{table}
 
+\paragraph{What a handler does.}  A handler declares every effect it has
+outside itself: the columns it reads and writes, the messages it raises, the
+tables it changes, its use of MPI.  The tools then give it access to
+nothing else, so that most undeclared effects do not compile.  What can
+bypass the interface, such as a write through a stray pointer, is found in
+an \emph{audit mode}, in which the columns a handler did not declare are
+made inaccessible and a stray access stops the program at the instruction
+that made it.  Every handler a package ships must be tested in that mode.
+Because effects are declared, the order in which handlers run is computed
+and not left to chance: two handlers that touch the same data must be given
+an order, and an omitted one is an error before the run.
+
 \paragraph{During the run.}  A package never aborts the program.  It
 reports a structured error and returns, and the infrastructure stops every
 process at the same point and prints one report, merged across processes,
